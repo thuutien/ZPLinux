@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Callable, List, Optional
 from urllib.parse import unquote, urlparse
@@ -33,11 +34,15 @@ from .widgets import CSS, PropertyForm, Toast, dim_label, icon_button  # noqa: E
 
 SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "labelix", "settings.json")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FLATPAK = os.path.exists("/.flatpak-info")
 INSTALLED = HERE.startswith("/usr/")
 # How to start the bundled fake printer: an installed command, or the script in the source tree.
-FAKE_PRINTER_CMD = ("labelix-fake-printer --render" if INSTALLED
+FAKE_PRINTER_CMD = (f"flatpak run --command=labelix-fake-printer {APP_ID} --render" if FLATPAK
+                    else "labelix-fake-printer --render" if INSTALLED
                     else "python3 tools/fake_printer.py --render")
 MAX_RECENT = 8
+PRINTER_ICONS = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
+                 "cups": "printer-symbolic", "file": "text-x-generic-symbolic"}
 
 # (name, width_mm, height_mm)
 SIZE_PRESETS = [
@@ -145,22 +150,51 @@ def file_paths(data) -> List[str]:
             if urlparse(u).scheme == "file"]
 
 
+@dataclass(eq=False)          # each open document is its own tab, even if two look alike
+class Document:
+    """One open label (one tab): the label itself and everything that goes with editing it."""
+    label: Label = field(default_factory=Label)
+    values: dict = field(default_factory=dict)   # preview/print values for {variables}
+    path: Optional[str] = None
+    dirty: bool = False
+    selected: Optional[Element] = None
+    undo_stack: List[str] = field(default_factory=list)
+    redo_stack: List[str] = field(default_factory=list)
+    undo_key: Optional[str] = None
+    zoom: Optional[float] = None                 # None: fit to the window when shown
+    panel: str = "element"
+
+    def name(self) -> str:
+        return os.path.basename(self.path) if self.path else "Untitled label"
+
+
+def _doc_property(attr):
+    return property(lambda self: getattr(self.doc, attr),
+                    lambda self, v: setattr(self.doc, attr, v))
+
+
 class Window(Gtk.ApplicationWindow):
+    # The editor works on the document in the current tab.
+    label = _doc_property("label")
+    values = _doc_property("values")
+    path = _doc_property("path")
+    dirty = _doc_property("dirty")
+    selected = _doc_property("selected")
+    undo_stack = _doc_property("undo_stack")
+    redo_stack = _doc_property("redo_stack")
+    undo_key = _doc_property("undo_key")
+
     def __init__(self, app, path: Optional[str] = None):
         super().__init__(application=app, title=APP_NAME)
         self.set_default_size(1320, 860)
         self.set_icon_name("labelix")
         self.settings = load_settings()
-        self.printer = printing.PrinterConfig.from_dict(self.settings.get("printer", {}))
+        self.printers, self.default_printer = printing.load_printers(self.settings)
+        self.printer = self.printers[self.default_printer]   # where Print sends jobs
         self.unit = self.settings.get("units", "mm")
-        self.label = Label()
-        self.path: Optional[str] = None
-        self.dirty = False
-        self.selected: Optional[Element] = None
-        self.values: dict = {}           # preview/print values for {variables}
-        self.undo_stack: List[str] = []
-        self.redo_stack: List[str] = []
-        self.undo_key: Optional[str] = None
+        self.doc = Document()            # stand-in while no label is open
+        self.docs: List[Document] = []   # in tab order
+        self._switching_tabs = False
         self.props_form: Optional[PropertyForm] = None
         self.latest: Optional[updater.Release] = None
         self.updating = False
@@ -198,6 +232,7 @@ class Window(Gtk.ApplicationWindow):
 
         self.show_all()
         self.toast.set_reveal_child(False)
+        self.tabs.hide()
         if path:
             self.open_path(path)
         else:
@@ -232,7 +267,11 @@ class Window(Gtk.ApplicationWindow):
             if accels:
                 app.set_accels_for_action(f"win.{name}", list(accels))
 
-        add("new", self.new_label, ["<Primary>n"])
+        add("new", self.new_label, ["<Primary>n", "<Primary>t"])
+        add("close-tab", lambda: self.close_document(self.doc), ["<Primary>w"])
+        add("next-tab", lambda: self.cycle_tab(1), ["<Primary>Page_Down", "<Primary>Tab"])
+        add("prev-tab", lambda: self.cycle_tab(-1),
+            ["<Primary>Page_Up", "<Primary><Shift>Tab", "<Primary><Shift>ISO_Left_Tab"])
         add("open", self.open_dialog, ["<Primary>o"])
         add("save", self.save, ["<Primary>s"])
         add("save-as", self.save_as, ["<Primary><Shift>s"])
@@ -264,7 +303,8 @@ class Window(Gtk.ApplicationWindow):
         self.canvas.snap = v
 
     EDITOR_ACTIONS = ("save", "save-as", "export-zpl", "export-png", "print", "print-csv",
-                      "undo", "redo", "duplicate", "zoom-in", "zoom-out", "zoom-100", "zoom-fit")
+                      "undo", "redo", "duplicate", "zoom-in", "zoom-out", "zoom-100", "zoom-fit",
+                      "close-tab", "next-tab", "prev-tab")
 
     def _editor_actions_enabled(self, on: bool):
         for name in self.EDITOR_ACTIONS:
@@ -289,6 +329,11 @@ class Window(Gtk.ApplicationWindow):
             b.set_action_name(action)
             return b
 
+        self.back_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.BUTTON)
+        self.back_btn.set_tooltip_text("Back to the open labels (Esc)")
+        self.back_btn.connect("clicked", lambda *_: self.show_editor())
+        self.back_btn.set_no_show_all(True)
+        hb.pack_start(self.back_btn)
         hb.pack_start(action_button("document-new-symbolic", "New label (Ctrl+N)", "win.new"))
         hb.pack_start(action_button("document-open-symbolic", "Open (Ctrl+O)", "win.open"))
         hist = Gtk.Box()
@@ -304,7 +349,7 @@ class Window(Gtk.ApplicationWindow):
         for items in ((("Save As…", "win.save-as"), ("Export ZPL…", "win.export-zpl"),
                        ("Export PNG Preview…", "win.export-png")),
                       (("Print from CSV…", "win.print-csv"),
-                       ("Printer Settings…", "win.printer-settings")),
+                       ("Printers…", "win.printer-settings")),
                       (("Show Grid", "win.show-grid"), ("Snap to Guides", "win.snap")),
                       (("Preferences", "win.preferences"),
                        ("Keyboard Shortcuts", "win.shortcuts"),
@@ -349,27 +394,21 @@ class Window(Gtk.ApplicationWindow):
     def _build_print_popover(self) -> Gtk.Popover:
         pop = Gtk.Popover()
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
-        box.set_size_request(280, -1)
+        box.set_size_request(300, -1)
         pop.add(box)
-        t = Gtk.Label(label="Printer", xalign=0)
+        t = Gtk.Label(label="Print to", xalign=0)
         t.get_style_context().add_class("card-title")
         box.pack_start(t, False, False, 0)
-        row = Gtk.Box(spacing=10)
-        self.pp_icon = Gtk.Image()
-        row.pack_start(self.pp_icon, False, False, 0)
-        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.pp_method = Gtk.Label(xalign=0)
-        self.pp_target = dim_label("")
-        col.pack_start(self.pp_method, False, False, 0)
-        col.pack_start(self.pp_target, False, False, 0)
-        row.pack_start(col, True, True, 0)
-        box.pack_start(row, False, False, 0)
+        self.pp_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.pp_list.get_style_context().add_class("card")
+        self.pp_list.connect("row-activated", self._on_printer_row)
+        box.pack_start(self.pp_list, False, False, 0)
         self.pp_result = dim_label("")
         self.pp_result.set_selectable(True)
         self.pp_result.set_no_show_all(True)
         box.pack_start(self.pp_result, False, False, 0)
         btns = Gtk.Box(spacing=6, homogeneous=True)
-        change = Gtk.Button(label="Change…")
+        change = Gtk.Button(label="Printers…")
         change.connect("clicked", lambda *_: (pop.popdown(), self.printer_dialog()))
         test = Gtk.Button(label="Test Connection")
         test.connect("clicked", lambda *_: self._test_printer())
@@ -385,12 +424,31 @@ class Window(Gtk.ApplicationWindow):
         return pop
 
     def _update_printer_info(self):
-        icon = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
-                "cups": "printer-symbolic", "file": "text-x-generic-symbolic"}[self.printer.method]
-        self.pp_icon.set_from_icon_name(icon, Gtk.IconSize.DND)
-        self.pp_method.set_text(printing.METHOD_LABELS[self.printer.method])
-        self.pp_target.set_text(self.printer.describe())
+        for row in self.pp_list.get_children():
+            self.pp_list.remove(row)
+        for i, cfg in enumerate(self.printers):
+            row = Gtk.ListBoxRow()
+            row.printer = cfg
+            hbox = Gtk.Box(spacing=10, margin=8)
+            hbox.pack_start(Gtk.Image.new_from_icon_name(PRINTER_ICONS[cfg.method],
+                                                         Gtk.IconSize.DND), False, False, 0)
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            name = Gtk.Label(label=cfg.title(), xalign=0, ellipsize=Pango.EllipsizeMode.END)
+            col.pack_start(name, False, False, 0)
+            sub = cfg.describe() + (" · Default" if i == self.default_printer else "")
+            col.pack_start(dim_label(sub, wrap=False), False, False, 0)
+            hbox.pack_start(col, True, True, 0)
+            check = Gtk.Image.new_from_icon_name("object-select-symbolic", Gtk.IconSize.BUTTON)
+            check.set_opacity(1 if cfg is self.printer else 0)
+            hbox.pack_end(check, False, False, 0)
+            row.add(hbox)
+            self.pp_list.add(row)
+        self.pp_list.show_all()
         self.pp_result.hide()
+
+    def _on_printer_row(self, lb, row):
+        self.printer = row.printer
+        self._update_printer_info()
 
     def _test_printer(self):
         try:
@@ -562,23 +620,37 @@ class Window(Gtk.ApplicationWindow):
         self.stack.set_visible_child_name("welcome")
         for w in (self.hist_box, self.print_box, self.save_btn):
             w.hide()
+        self.back_btn.set_visible(bool(self.docs))
+        self.tabs.hide()
         self._editor_actions_enabled(False)
         self.header.set_subtitle(None)
-        self.path = None
-        self.dirty = False
 
     def show_editor(self):
         self.stack.set_visible_child_name("editor")
         for w in (self.hist_box, self.print_box, self.save_btn):
             w.show()
+        self.back_btn.hide()
+        self.tabs.show()
         self._editor_actions_enabled(True)
         self.update_title()
-        GLib.idle_add(self.zoom_fit)
 
     # ---- editor layout ------------------------------------------------------
 
     def _build_editor(self) -> Gtk.Widget:
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # The notebook is only the tab strip: its pages are empty and every tab shares
+        # the editor below, which shows the current tab's document.
+        self.tabs = Gtk.Notebook(scrollable=True, show_border=False)
+        self.tabs.get_style_context().add_class("doc-tabs")
+        self.tabs.connect("switch-page", self._on_switch_tab)
+        self.tabs.connect("page-reordered", self._on_tabs_reordered)
+        new_tab = icon_button("tab-new-symbolic", "New label (Ctrl+T)", self.new_label)
+        new_tab.show()
+        self.tabs.set_action_widget(new_tab, Gtk.PackType.END)
+        self.tabs.set_no_show_all(True)
+        outer.pack_start(self.tabs, False, False, 0)
         main = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        outer.pack_start(main, True, True, 0)
 
         # Left sidebar: insert tiles + layers
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -665,7 +737,7 @@ class Window(Gtk.ApplicationWindow):
         self.panel_stack.add_titled(self.label_box, "label", "Label")
         self.panel_stack.add_titled(self._build_zpl_page(), "zpl", "ZPL")
         main.pack_start(right, False, False, 0)
-        return main
+        return outer
 
     def _build_zpl_page(self) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
@@ -692,35 +764,104 @@ class Window(Gtk.ApplicationWindow):
     # ---- document -----------------------------------------------------------
 
     def new_label(self):
-        if self.confirm_discard():
-            self.show_welcome()
+        """Show the start screen; the label picked there opens in a new tab."""
+        self.show_welcome()
 
     def start_from(self, factory: Callable) -> bool:
-        if self.in_editor() and not self.confirm_discard():
-            return False
-        self.label, self.values = factory()
-        self.path = None
-        self._load_document()
+        label, values = factory()
+        self.add_document(Document(label=label, values=values))
         return True
 
-    def _load_document(self):
-        self._reset_history()
-        self.selected = None
+    def add_document(self, doc: Document):
+        page = Gtk.Box()
+        page.doc = doc
+        tab = Gtk.Box(spacing=4)
+        tab.title = Gtk.Label(ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=24)
+        tab.pack_start(tab.title, True, True, 0)
+        close = icon_button("window-close-symbolic", "Close (Ctrl+W)",
+                            lambda: self.close_document(doc))
+        close.get_style_context().add_class("tab-close")
+        tab.pack_start(close, False, False, 0)
+        tab.show_all()
+        page.show()
+        doc.page, doc.tab = page, tab
+        self.docs.append(doc)
+        self._update_tab(doc)
+        n = self.tabs.append_page(page, tab)
+        self.tabs.set_tab_reorderable(page, True)
+        self.tabs.child_set_property(page, "tab-expand", False)
+        self.show_editor()
+        if self.tabs.get_current_page() == n:
+            self.switch_to(doc)       # the first tab: switch-page already fired
+        else:
+            self.tabs.set_current_page(n)
+
+    def _update_tab(self, doc: Document):
+        text = ("• " if doc.dirty else "") + doc.name()
+        doc.tab.title.set_text(text)
+        doc.tab.title.set_width_chars(min(len(text), 24))
+        doc.tab.set_tooltip_text(doc.path or doc.name())
+
+    def _on_switch_tab(self, _nb, page, _n):
+        if not self._switching_tabs:
+            self.switch_to(page.doc)
+
+    def _on_tabs_reordered(self, nb, _page, _n):
+        self.docs = [nb.get_nth_page(i).doc for i in range(nb.get_n_pages())]
+
+    def switch_to(self, doc: Document):
+        """Show doc in the editor, keeping the old document's zoom and panel."""
+        if self.doc in self.docs and self.doc is not doc:
+            self.doc.zoom = self.canvas.zoom
+            self.doc.panel = self.panel_stack.get_visible_child_name()
+        self.doc = doc
+        self._switching_tabs = True
+        self.tabs.set_current_page(self.tabs.page_num(doc.page))
+        self._switching_tabs = False
         self.props_form = None
         self._layers_sig = None
-        self.dirty = False
+        self._shown_vars = None
         self.refresh_label_panel()
         self.build_props()
-        self.canvas.resize_to_label()
+        self.panel_stack.set_visible_child_name(doc.panel)
         self.refresh_zpl()
         self.refresh_layers()
         self.update_status()
         self.show_editor()
+        self._update_history_buttons()
+        if doc.zoom is None:
+            self.canvas.resize_to_label()
+            GLib.idle_add(self.zoom_fit)
+        else:
+            self.set_zoom(doc.zoom)
+
+    def cycle_tab(self, step: int):
+        if len(self.docs) > 1 and self.in_editor():
+            i = self.docs.index(self.doc)
+            self.switch_to(self.docs[(i + step) % len(self.docs)])
+
+    def close_document(self, doc: Document) -> bool:
+        if doc not in self.docs:
+            return True
+        if doc.dirty:
+            self.switch_to(doc)
+            if not self.confirm_discard():
+                return False
+        self.docs.remove(doc)
+        self._switching_tabs = True
+        self.tabs.remove_page(self.tabs.page_num(doc.page))
+        self._switching_tabs = False
+        if not self.docs:
+            self.doc = Document()
+            self.show_welcome()
+        elif doc is self.doc:
+            self.doc = Document()     # closed: nothing to remember for it
+            self.switch_to(self.docs[min(self.tabs.get_current_page(), len(self.docs) - 1)])
+        return True
 
     def open_dialog(self):
-        if not self.confirm_discard():
-            return
         dlg = Gtk.FileChooserNative.new("Open Label", self, Gtk.FileChooserAction.OPEN, None, None)
+        dlg.set_select_multiple(True)
         f = Gtk.FileFilter()
         f.set_name("Labelix labels (*.labelix)")
         f.add_pattern("*.labelix")
@@ -728,9 +869,15 @@ class Window(Gtk.ApplicationWindow):
         dlg.add_filter(f)
         self._set_dialog_folder(dlg)
         if dlg.run() == Gtk.ResponseType.ACCEPT:
-            self.open_path(dlg.get_filename())
+            for path in dlg.get_filenames():
+                self.open_path(path)
 
     def open_path(self, path):
+        same = next((d for d in self.docs if d.path and os.path.abspath(d.path)
+                     == os.path.abspath(path)), None)
+        if same:
+            self.switch_to(same)
+            return
         try:
             with open(path) as f:
                 text = f.read()
@@ -739,10 +886,9 @@ class Window(Gtk.ApplicationWindow):
         except (OSError, ValueError, KeyError, TypeError) as e:
             self.error("Could not open label", str(e))
             return
-        self.label, self.values, self.path = label, values, path
         self._remember_folder(path)
         self._add_recent(path)
-        self._load_document()
+        self.add_document(Document(label=label, values=values, path=path))
 
     def _document_json(self) -> str:
         d = json.loads(self.label.to_json())
@@ -827,15 +973,21 @@ class Window(Gtk.ApplicationWindow):
         return r == Gtk.ResponseType.NO
 
     def on_delete_event(self, *_):
-        return not self.confirm_discard()
+        """Closing the window: offer to save every tab with changes."""
+        for doc in [d for d in self.docs if d.dirty]:
+            self.switch_to(doc)
+            if not self.confirm_discard():
+                return True
+            doc.dirty = False
+        return False
 
     def drop_files(self, paths, x=None, y=None):
         """Files dropped on the window or canvas: open labels, add images."""
-        for p in paths:
-            if p.lower().endswith((".labelix", ".json")):
-                if self.confirm_discard():
-                    self.open_path(p)
-                return
+        labels = [p for p in paths if p.lower().endswith((".labelix", ".json"))]
+        if labels:
+            for p in labels:
+                self.open_path(p)
+            return
         if not self.in_editor():
             self.notify("Start or open a label first, then drop images onto it.")
             return
@@ -1042,6 +1194,8 @@ class Window(Gtk.ApplicationWindow):
 
     def activate_element(self, el: Element):
         """Double-click or Enter: jump to the element's main field."""
+        if not any(e is el for e in self.label.elements):
+            return False          # queued for a tab that is no longer the current one
         if el is not self.selected:
             self.select(el)
         self.panel_stack.set_visible_child_name("element")
@@ -1404,8 +1558,9 @@ class Window(Gtk.ApplicationWindow):
     # ---- refresh ------------------------------------------------------------
 
     def update_title(self):
-        name = os.path.basename(self.path) if self.path else "Untitled label"
-        self.header.set_subtitle(("• " if self.dirty else "") + name)
+        self.header.set_subtitle(("• " if self.dirty else "") + self.doc.name())
+        if self.doc in self.docs:
+            self._update_tab(self.doc)
 
     def current_zpl(self) -> str:
         return zpl.label_zpl(self.label, self.values)
@@ -1518,6 +1673,9 @@ class Window(Gtk.ApplicationWindow):
 
     def on_key(self, widget, ev):
         if not self.in_editor():
+            if Gdk.keyval_name(ev.keyval) == "Escape" and self.docs:
+                self.show_editor()
+                return True
             return False
         key = Gdk.keyval_name(ev.keyval) or ""
         # Leave typing keys alone while an input field has focus; Escape returns to the canvas.
@@ -1597,7 +1755,8 @@ class Window(Gtk.ApplicationWindow):
         missing = [v for v in needed if v not in cols]
         copies = self.label.copies
         detail = (f"{len(rows)} row{'s' if len(rows) != 1 else ''} × {copies} "
-                  f"cop{'y' if copies == 1 else 'ies'} to {self.printer.describe()}.\n"
+                  f"cop{'y' if copies == 1 else 'ies'} to {self.printer.title()} "
+                  f"({self.printer.describe()}).\n"
                   f"Columns: {', '.join(cols)}")
         if missing:
             detail += ("\n\nNot in the CSV (the values from the Label tab are used): "
@@ -1613,7 +1772,7 @@ class Window(Gtk.ApplicationWindow):
             path = self.choose_save("Save Print Job", "job.zpl", ("ZPL files", "*.zpl"))
             if not path:
                 return
-            cfg = printing.PrinterConfig(method="file", file_path=path)
+            cfg = printing.PrinterConfig(name=cfg.name, method="file", file_path=path)
         try:
             where = printing.send(data, cfg)
         except printing.PrintError as e:
@@ -1626,32 +1785,55 @@ class Window(Gtk.ApplicationWindow):
         except OSError as e:
             self.error("Printing failed", str(e))
             return
-        self.notify(f"Sent {what} to {where}")
+        self.notify(f"Sent {what} to {cfg.title()} ({where})")
 
     def printer_dialog(self):
-        dlg = Gtk.Dialog(title="Printer", transient_for=self, modal=True, use_header_bar=True)
+        dlg = Gtk.Dialog(title="Printers", transient_for=self, modal=True, use_header_bar=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
         dlg.set_default_response(Gtk.ResponseType.OK)
         dlg.get_widget_for_response(Gtk.ResponseType.OK).get_style_context().add_class(
             "suggested-action")
-        cfg = printing.PrinterConfig.from_dict(self.printer.to_dict())
-        grid = Gtk.Grid(column_spacing=10, row_spacing=10, margin=16)
-        dlg.get_content_area().add(grid)
+        # Edit copies; nothing changes until Save.
+        printers = [printing.PrinterConfig.from_dict(p.to_dict()) for p in self.printers]
+        in_use = printers[next(i for i, p in enumerate(self.printers) if p is self.printer)]
+        state = SimpleNamespace(current=None, default=printers[self.default_printer],
+                                loading=False)
 
+        body = Gtk.Box(spacing=16, margin=16)
+        dlg.get_content_area().add(body)
+
+        # left: the saved printers
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.pack_start(side, False, False, 0)
+        listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.BROWSE)
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, min_content_height=240,
+                                shadow_type=Gtk.ShadowType.IN)
+        sw.set_size_request(250, -1)
+        sw.add(listbox)
+        side.pack_start(sw, True, True, 0)
+        tools = Gtk.Box()
+        tools.get_style_context().add_class("linked")
+        side.pack_start(tools, False, False, 0)
+
+        # right: the selected printer
+        grid = Gtk.Grid(column_spacing=10, row_spacing=10, hexpand=True)
+        body.pack_start(grid, True, True, 0)
+        name = Gtk.Entry(hexpand=True, activates_default=True,
+                         placeholder_text="e.g. Warehouse GK420d")
+        grid.attach(Gtk.Label(label="Name", xalign=0), 0, 0, 1, 1)
+        grid.attach(name, 1, 0, 1, 1)
         method = Gtk.ComboBoxText()
         for m in printing.METHODS:
             method.append(m, printing.METHOD_LABELS[m])
-        method.set_active_id(cfg.method)
-        grid.attach(Gtk.Label(label="Connection", xalign=0), 0, 0, 1, 1)
-        grid.attach(method, 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="Connection", xalign=0), 0, 1, 1, 1)
+        grid.attach(method, 1, 1, 1, 1)
         stack = Gtk.Stack(vhomogeneous=False)
-        grid.attach(stack, 0, 1, 2, 1)
+        grid.attach(stack, 0, 2, 2, 1)
 
         g = Gtk.Grid(column_spacing=10, row_spacing=10)
-        host = Gtk.Entry(text=cfg.host, hexpand=True, activates_default=True,
+        host = Gtk.Entry(hexpand=True, activates_default=True,
                          placeholder_text="e.g. 192.168.1.50")
         port = Gtk.SpinButton.new_with_range(1, 65535, 1)
-        port.set_value(cfg.port)
         g.attach(Gtk.Label(label="Address", xalign=0), 0, 0, 1, 1)
         g.attach(host, 1, 0, 1, 1)
         g.attach(Gtk.Label(label="Port", xalign=0), 0, 1, 1, 1)
@@ -1665,7 +1847,6 @@ class Window(Gtk.ApplicationWindow):
         found = printing.usb_devices()
         for d in found:
             dev.append_text(d)
-        dev.get_child().set_text(cfg.device)
         dev.set_hexpand(True)
         g.attach(Gtk.Label(label="Device", xalign=0), 0, 0, 1, 1)
         g.attach(dev, 1, 0, 1, 1)
@@ -1678,7 +1859,6 @@ class Window(Gtk.ApplicationWindow):
         queue = Gtk.ComboBoxText.new_with_entry()
         for q in printing.cups_queues():
             queue.append_text(q)
-        queue.get_child().set_text(cfg.cups_queue)
         queue.set_hexpand(True)
         g.attach(Gtk.Label(label="Printer", xalign=0), 0, 0, 1, 1)
         g.attach(queue, 1, 0, 1, 1)
@@ -1687,27 +1867,151 @@ class Window(Gtk.ApplicationWindow):
         stack.add_named(g, "cups")
 
         g = Gtk.Grid(column_spacing=10, row_spacing=10)
-        fentry = Gtk.Entry(text=cfg.file_path, hexpand=True, placeholder_text="Ask each time")
+        fentry = Gtk.Entry(hexpand=True, placeholder_text="Ask each time")
         g.attach(Gtk.Label(label="File", xalign=0), 0, 0, 1, 1)
         g.attach(fentry, 1, 0, 1, 1)
         g.attach(dim_label("Writes print jobs to a .zpl file instead of a printer."), 0, 1, 2, 1)
         stack.add_named(g, "file")
 
-        method.connect("changed", lambda c: stack.set_visible_child_name(c.get_active_id()))
-        dlg.set_default_size(480, -1)
-        dlg.show_all()
-        stack.set_visible_child_name(cfg.method)
-        if dlg.run() == Gtk.ResponseType.OK:
+        default = Gtk.CheckButton(label="Default printer")
+        grid.attach(default, 0, 3, 2, 1)
+        test_row = Gtk.Box(spacing=10)
+        test = Gtk.Button(label="Test Connection")
+        result = dim_label("")
+        result.set_selectable(True)
+        test_row.pack_start(test, False, False, 0)
+        test_row.pack_start(result, True, True, 0)
+        grid.attach(test_row, 0, 4, 2, 1)
+
+        def store():
+            """Copy the form into the printer being edited."""
+            cfg = state.current
+            if cfg is None or state.loading:
+                return
+            cfg.name = name.get_text().strip()
             cfg.method = method.get_active_id()
             cfg.host = host.get_text().strip()
             cfg.port = port.get_value_as_int()
             cfg.device = dev.get_child().get_text().strip()
             cfg.cups_queue = queue.get_child().get_text().strip()
             cfg.file_path = fentry.get_text().strip()
-            self.printer = cfg
-            self.settings["printer"] = cfg.to_dict()
+
+        def load(cfg):
+            state.loading = True
+            state.current = cfg
+            name.set_text(cfg.name)
+            method.set_active_id(cfg.method)
+            stack.set_visible_child_name(cfg.method)
+            host.set_text(cfg.host)
+            port.set_value(cfg.port)
+            dev.get_child().set_text(cfg.device)
+            queue.get_child().set_text(cfg.cups_queue)
+            fentry.set_text(cfg.file_path)
+            default.set_active(cfg is state.default)
+            default.set_sensitive(cfg is not state.default)   # always keep one default
+            result.set_text("")
+            state.loading = False
+
+        def update_row(row):
+            row.label.set_text(row.printer.name or "Unnamed printer")
+            row.tag.set_visible(row.printer is state.default)
+
+        def fill_list(select):
+            for row in listbox.get_children():
+                listbox.remove(row)
+            for cfg in printers:
+                row = Gtk.ListBoxRow()
+                row.printer = cfg
+                hbox = Gtk.Box(spacing=8, margin=6)
+                hbox.pack_start(Gtk.Image.new_from_icon_name(PRINTER_ICONS[cfg.method],
+                                                             Gtk.IconSize.BUTTON), False, False, 0)
+                row.label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+                hbox.pack_start(row.label, True, True, 0)
+                row.tag = dim_label("Default", wrap=False)
+                row.tag.set_no_show_all(True)
+                hbox.pack_end(row.tag, False, False, 0)
+                update_row(row)
+                row.add(hbox)
+                listbox.add(row)
+                if cfg is select:
+                    listbox.select_row(row)
+            listbox.show_all()
+            remove.set_sensitive(len(printers) > 1)
+
+        def selected(_lb, row):
+            if row is not None and row.printer is not state.current:
+                store()
+                load(row.printer)
+
+        def changed(*_):
+            store()
+            row = listbox.get_selected_row()
+            if row is not None and not state.loading:
+                update_row(row)
+
+        def method_changed(c):
+            stack.set_visible_child_name(c.get_active_id())
+            if not state.loading:
+                store()
+                fill_list(state.current)
+
+        def add():
+            store()
+            cfg = printing.PrinterConfig(name=f"Printer {len(printers) + 1}", host="")
+            printers.append(cfg)
+            fill_list(cfg)
+            name.grab_focus()
+
+        def delete():
+            cfg = state.current
+            if cfg is None or len(printers) < 2:
+                return
+            i = next(i for i, p in enumerate(printers) if p is cfg)
+            del printers[i]
+            if state.default is cfg:
+                state.default = printers[0]
+            state.current = None
+            fill_list(printers[min(i, len(printers) - 1)])
+
+        def default_toggled(b):
+            if state.loading or not b.get_active():
+                return
+            state.default = state.current
+            b.set_sensitive(False)
+            for row in listbox.get_children():
+                update_row(row)
+
+        def run_test():
+            store()
+            try:
+                result.set_text("✓ " + printing.test(state.current))
+            except printing.PrintError as e:
+                result.set_text("✗ " + str(e))
+
+        addb = icon_button("list-add-symbolic", "Add printer", add, flat=False)
+        remove = icon_button("list-remove-symbolic", "Remove printer", delete, flat=False)
+        tools.pack_start(addb, False, False, 0)
+        tools.pack_start(remove, False, False, 0)
+        listbox.connect("row-selected", selected)
+        for w in (name, host, fentry, dev.get_child(), queue.get_child()):
+            w.connect("changed", changed)
+        port.connect("value-changed", changed)
+        method.connect("changed", method_changed)
+        default.connect("toggled", default_toggled)
+        test.connect("clicked", lambda *_: run_test())
+
+        dlg.set_default_size(760, -1)
+        dlg.show_all()
+        fill_list(in_use)
+        if dlg.run() == Gtk.ResponseType.OK:
+            store()
+            index = next(i for i, p in enumerate(printers) if p is state.default)
+            printing.store_printers(self.settings, printers, index)
             save_settings(self.settings)
-            self.notify(f"Printer set to {printing.METHOD_LABELS[cfg.method]}: {cfg.describe()}")
+            self.printers, self.default_printer = printers, index
+            self.printer = in_use if any(p is in_use for p in printers) else state.default
+            self.notify(f"{len(printers)} printer{'s' if len(printers) != 1 else ''} saved · "
+                        f"default: {state.default.name}")
         dlg.destroy()
 
     # ---- preferences --------------------------------------------------------
@@ -1761,9 +2065,11 @@ class Window(Gtk.ApplicationWindow):
 
     def shortcuts_window(self):
         ui = SHORTCUTS_UI.format(
-            files=_shortcut_rows([("<Primary>n", "New label"), ("<Primary>o", "Open"),
+            files=_shortcut_rows([("<Primary>n", "New label in a new tab"), ("<Primary>o", "Open"),
                                   ("<Primary>s", "Save"), ("<Primary><Shift>s", "Save as"),
-                                  ("<Primary>e", "Export ZPL"), ("<Primary>p", "Print")]),
+                                  ("<Primary>e", "Export ZPL"), ("<Primary>p", "Print"),
+                                  ("<Primary>w", "Close tab"),
+                                  ("<Primary>Page_Down <Primary>Page_Up", "Next / previous tab")]),
             editing=_shortcut_rows([("<Primary>z", "Undo"), ("<Primary><Shift>z", "Redo"),
                                     ("<Primary>d", "Duplicate"), ("Delete", "Delete"),
                                     ("Tab", "Select next element"),
@@ -1881,9 +2187,9 @@ class Window(Gtk.ApplicationWindow):
         return False
 
     def restart(self):
-        if not self.confirm_discard():
+        if self.on_delete_event():
             return
-        argv = [sys.argv[0]] + ([self.path] if self.path else [])
+        argv = [sys.argv[0]] + [d.path for d in self.docs if d.path]
         os.execv(sys.executable, [sys.executable] + argv)
 
     # ---- dialogs ------------------------------------------------------------
@@ -1927,7 +2233,7 @@ class App(Gtk.Application):
         # Labelix's own icons: from the source tree, or where install.sh puts them.
         theme = Gtk.IconTheme.get_default()
         for d in (os.path.join(HERE, "data", "icons"), os.path.join(HERE, "data"),
-                  "/usr/share/labelix/icons"):
+                  os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "labelix", "icons")):
             if os.path.isdir(d):
                 theme.append_search_path(d)
 
@@ -1937,10 +2243,11 @@ class App(Gtk.Application):
         self.window.present()
 
     def do_open(self, files, n, hint):
-        path = files[0].get_path() if files else None
+        paths = [f.get_path() for f in files if f.get_path()]
         if not self.window:
-            self.window = Window(self, path)
-        elif path and self.window.confirm_discard():
+            self.window = Window(self, paths[0] if paths else None)
+            paths = paths[1:]
+        for path in paths:
             self.window.open_path(path)
         self.window.present()
 

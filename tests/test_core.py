@@ -164,5 +164,44 @@ class PrintingTests(unittest.TestCase):
             printing.send("^XA^XZ", printing.PrinterConfig(method="device", device="/nonexistent/lp9"))
 
 
+class SavedPrinterTests(unittest.TestCase):
+    def test_nothing_saved_gives_local_test_printer(self):
+        printers, default = printing.load_printers({})
+        self.assertEqual(len(printers), 1)
+        self.assertEqual(default, 0)
+        self.assertEqual(printers[0].host, "127.0.0.1")
+        self.assertTrue(printers[0].name)
+
+    def test_old_single_printer_is_migrated(self):
+        settings = {"printer": {"method": "device", "device": "/dev/usb/lp1"}}
+        printers, default = printing.load_printers(settings)
+        self.assertEqual([p.device for p in printers], ["/dev/usb/lp1"])
+        self.assertEqual(default, 0)
+        printing.store_printers(settings, printers, default)
+        self.assertNotIn("printer", settings)
+        self.assertEqual(settings["default_printer"], printers[0].name)
+
+    def test_round_trip_keeps_names_and_default(self):
+        settings = {}
+        printers = [printing.PrinterConfig(name="Office", host="10.0.0.5"),
+                    printing.PrinterConfig(name="Warehouse GK420d", method="cups",
+                                           cups_queue="GK420d")]
+        printing.store_printers(settings, printers, 1)
+        loaded, default = printing.load_printers(settings)
+        self.assertEqual([p.name for p in loaded], ["Office", "Warehouse GK420d"])
+        self.assertEqual(default, 1)
+        self.assertEqual(loaded[default].cups_queue, "GK420d")
+
+    def test_missing_default_falls_back_to_first(self):
+        settings = {"printers": [{"name": "A"}, {"name": "B"}], "default_printer": "gone"}
+        self.assertEqual(printing.load_printers(settings)[1], 0)
+
+    def test_names_are_made_unique(self):
+        printers = [printing.PrinterConfig(name="Zebra"), printing.PrinterConfig(name="Zebra"),
+                    printing.PrinterConfig(name="  ")]
+        printing.unique_names(printers)
+        self.assertEqual([p.name for p in printers], ["Zebra", "Zebra (2)", "Printer 3"])
+
+
 if __name__ == "__main__":
     unittest.main()

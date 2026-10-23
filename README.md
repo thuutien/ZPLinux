@@ -20,6 +20,8 @@ Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
 
 - **Start screen** with ready-made templates (shipping, product, price tag,
   address, asset tag, blank sizes) and your recent labels
+- **Tabs**: open and edit several labels at once, each with its own undo
+  history and zoom (Ctrl+T new, Ctrl+W close, Ctrl+PageUp/PageDown to switch)
 - **Canvas**: text, Code 128 barcodes, QR codes, boxes/lines, ellipses and
   images (converted to 1-bit for thermal printing). Drag to move, drag the
   round handle to resize, double-click to edit content, right-click for more
@@ -45,8 +47,19 @@ Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
 [releases page](https://github.com/thuutien/labelix/releases/latest):
 
 ```bash
-sudo apt install ./labelix_0.1.1_all.deb
+sudo apt install ./labelix_0.2.0_all.deb
 ```
+
+**Flatpak (any distribution)**: download `labelix-0.2.0.flatpak` from the
+releases page and install it for your user. Flatpak fetches the GNOME runtime
+from Flathub if you don't have it yet:
+
+```bash
+flatpak install --user ./labelix-0.2.0.flatpak
+```
+
+The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`), CUPS
+and your home folder. To build it yourself, run `packaging/build-flatpak.sh`.
 
 **Arch / Manjaro**: build from `packaging/arch/PKGBUILD` with `makepkg -si`.
 
@@ -70,6 +83,8 @@ exists, a bar at the top of the window offers to install it:
   file, checks it against the SHA-256 checksum GitHub publishes, and installs
   it with `pkexec` (you'll be asked for your password), then offers to restart.
 - **AUR / other package managers**: update through the package manager.
+- **Flatpak**: the bar links to the release page; install the new
+  `.flatpak` file the same way as the first one.
 - **Running from source**: the bar links to the release page.
 
 For this to work, each GitHub release (tag `v<version>`) needs
@@ -80,6 +95,7 @@ For this to work, each GitHub release (tag `v<version>`) needs
 ```bash
 ./packaging/build-tarball.sh   # dist/labelix-<version>.tar.gz (prints its sha256)
 ./packaging/build-deb.sh       # dist/labelix_<version>_all.deb
+./packaging/build-flatpak.sh   # dist/labelix-<version>.flatpak (needs flatpak-builder)
 ```
 
 The PKGBUILD downloads `labelix-<version>.tar.gz` from the GitHub release
@@ -127,7 +143,10 @@ You can also paste the ZPL from the ZPL tab into the
 
 ## Connecting a real printer
 
-Open **Printer settings** (the button next to Print):
+Open **Printers…** (in the menu next to Print) to add as many printers as you
+like, give each a name, and mark one as the **default**. Labelix prints to the
+default printer; the menu next to Print lets you pick another one for this
+session. Each printer connects in one of these ways:
 
 - **Network**: the printer's IP address, port 9100.
 - **USB device file**: usually `/dev/usb/lp0`. Your user needs to be in the
