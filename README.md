@@ -46,9 +46,10 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 - **Layers list** to pick overlapping elements, plus align and arrange buttons
 - **Rotation**: turn text, barcodes and images by 90° steps (Ctrl+R, or the
   Rotation setting); boxes and ellipses swap width and height. QR codes and
-  MaxiCode print upright, as printers draw them. **Orientation** on the Label tab
-  turns the whole design on screen, for labels you read sideways; what prints
-  stays the same
+  MaxiCode print upright, as printers draw them
+- **Rotate when printing** (Label tab): design a label one way and print it
+  turned onto stock that feeds the other way, such as a 6 × 4 in landscape
+  design on 4 × 6 in labels
 - Work in **millimetres, inches or printer dots** (Preferences); 203 / 300 /
   600 dpi; label size presets (4×6, 4×2, 2×1 in…)
 - Live ZPL view with copy and export

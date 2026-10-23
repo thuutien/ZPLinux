@@ -1680,20 +1680,15 @@ class Window(Gtk.ApplicationWindow):
         self.element_changed(el)
 
     def set_orientation(self, degrees: int):
-        """Turn the whole design on screen (paper and objects). The printed label stays
-        the same: printing turns it back."""
+        """How the design is turned when printed (onto label stock the other way round).
+        The design itself doesn't change."""
         lab = self.label
-        delta = (degrees - lab.orientation) % 360
-        if not delta:
+        if degrees % 360 == lab.orientation:
             return False
         self.checkpoint()
-        lab.turn_design(degrees)
-        self.refresh_label_panel()
-        self.build_props()
-        self.canvas.resize_to_label()
-        self.zoom_fit()
-        self.structure_changed()
-        self.update_status()
+        lab.orientation = degrees % 360
+        self.size_info.set_text(self._size_text())
+        self.mark_dirty()
         return False
 
     def refresh_label_panel(self):
@@ -1742,14 +1737,16 @@ class Window(Gtk.ApplicationWindow):
             hspin.set_value(h / MM_PER_INCH if imperial else h)
         preset.connect("changed", on_preset)
         form.combo("Resolution", p, "dpi", [(d, f"{d} dpi") for d in DPI_CHOICES])
-        turn_view = Gtk.ComboBoxText()
-        for deg, text in ((0, "As printed"), (90, "Turned 90° clockwise"), (180, "Upside down"),
-                          (270, "Turned 90° counterclockwise")):
-            turn_view.append(str(deg), text)
-        turn_view.set_active_id(str(lab.orientation % 360))
-        turn_view.connect("changed", lambda c: GLib.idle_add(
+        turn_print = Gtk.ComboBoxText()
+        for deg, text in ((0, "No"), (90, "90° clockwise"), (180, "180°"),
+                          (270, "90° counterclockwise")):
+            turn_print.append(str(deg), text)
+        turn_print.set_active_id(str(lab.orientation % 360))
+        turn_print.connect("changed", lambda c: GLib.idle_add(
             self.set_orientation, int(c.get_active_id())))
-        form.widget(turn_view, "Orientation")
+        form.widget(turn_print, "Rotate when printing")
+        form.hint("For a landscape design on labels that feed the other way, such as "
+                  "6 × 4 in on 4 × 6 in stock.")
         self.size_info = dim_label(self._size_text())
         form.widget(self.size_info)
 
@@ -1809,9 +1806,14 @@ class Window(Gtk.ApplicationWindow):
 
     def _size_text(self):
         lab = self.label
-        return (f"{lab.width_dots} × {lab.height_dots} printer dots · "
+        text = (f"{lab.width_dots} × {lab.height_dots} printer dots · "
                 f"{lab.width_mm:.1f} × {lab.height_mm:.1f} mm · "
                 f"{lab.width_mm / MM_PER_INCH:.2f} × {lab.height_mm / MM_PER_INCH:.2f} in")
+        if lab.orientation % 360:
+            w, h = lab.stock_mm
+            text += (f"\nPrints turned {lab.orientation}° onto {w:.1f} × {h:.1f} mm "
+                     f"({w / MM_PER_INCH:.2f} × {h / MM_PER_INCH:.2f} in) labels.")
+        return text
 
     # ---- refresh ------------------------------------------------------------
 

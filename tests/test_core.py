@@ -128,24 +128,36 @@ class RotationTests(unittest.TestCase):
         text_space = bc.size()[1] - bc.height
         self.assertIn(f"^FO{40 + text_space},300^BCR,60,Y", out)
 
-    def test_turning_the_design_prints_the_same(self):
-        def design():
-            return Label(width_mm=101.6, height_mm=50.8, elements=[
-                TextElement(x=30, y=20, text="Blue Mug", height=50),
-                Code128Element(x=30, y=120, data="MUG-0001", height=80, module=2),
-                QRElement(x=600, y=40, data="x", magnification=5),
-                BoxElement(x=10, y=10, w=790, h=380, thickness=4)])
-        from zplinux import render
-        upright = design()
-        for deg in (90, 180, 270):
-            turned = design()
-            render.measure(turned)
-            turned.turn_design(deg)
-            with self.subTest(orientation=deg):
-                self.assertEqual(zpl.label_zpl(turned), zpl.label_zpl(upright))
-                if deg % 180:
-                    self.assertEqual((turned.width_mm, turned.height_mm), (50.8, 101.6))
-                self.assertEqual(turned.elements[2].rotation, deg)  # the QR turns on screen
+    def landscape(self, orientation=0):
+        # a 6 x 4 in design
+        return Label(width_mm=152.4, height_mm=101.6, orientation=orientation, elements=[
+            TextElement(x=30, y=20, text="Blue Mug", height=50),
+            BoxElement(x=10, y=100, w=300, h=40, thickness=4),
+            QRElement(x=900, y=40, data="x", magnification=5)])
+
+    def test_rotate_when_printing(self):
+        out = zpl.label_zpl(self.landscape(90))
+        # prints on 4 x 6 in stock: 813 dots wide, 1219 long
+        self.assertIn("^PW813\n^LL1219", out)
+        # text at (30, 20), 50 high, turned 90 clockwise: x = 813 - 20 - 50
+        self.assertIn("^FO743,30^A0R,50,50", out)
+        # the box turns by swapping its sides
+        self.assertIn("^GB40,300,4", out)
+        self.assertNotIn("^PW1219", out)
+
+    def test_rotating_twice_the_other_way_matches(self):
+        self.assertEqual(zpl.label_zpl(self.landscape(0)).count("^A0N"), 1)
+        out90, out270 = zpl.label_zpl(self.landscape(90)), zpl.label_zpl(self.landscape(270))
+        self.assertIn("^A0R", out90)
+        self.assertIn("^A0B", out270)
+        self.assertIn("^A0I", zpl.label_zpl(self.landscape(180)))
+
+    def test_rotating_when_printing_leaves_the_design_alone(self):
+        lab = self.landscape(90)
+        before = lab.to_json()
+        zpl.label_zpl(lab)
+        self.assertEqual(lab.to_json(), before)
+        self.assertEqual(lab.stock_mm, (101.6, 152.4))
 
     def test_orientation_is_saved(self):
         lab = Label(orientation=90)

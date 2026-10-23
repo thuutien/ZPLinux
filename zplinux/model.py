@@ -317,8 +317,9 @@ class Label:
     darkness: int = 0         # -30..30 relative (^MD); 0 = printer default
     copies: int = 1
     elements: List[Element] = field(default_factory=list)
-    # How the design is turned on screen compared with the printed label, clockwise.
-    # width_mm and height_mm are the design's (swapped from the printed label at 90/270).
+    # Printing turns the design this many degrees clockwise onto the label stock, for
+    # example a 6 x 4 in landscape design printed on 4 x 6 in labels. width_mm and
+    # height_mm are the design's; the stock is the other way round at 90 and 270.
     orientation: int = 0
 
     @property
@@ -329,10 +330,17 @@ class Label:
     def height_dots(self) -> int:
         return round(self.height_mm * dpmm(self.dpi))
 
-    def turn_design(self, degrees: int) -> None:
-        """Set the on-screen orientation: the paper and every object turn together, so
-        what prints doesn't change. Needs the elements' measured sizes."""
-        delta = (degrees - self.orientation) % 360
+    @property
+    def stock_mm(self) -> tuple:
+        """(width, height) of the label stock the design prints on."""
+        if self.orientation % 180:
+            return (self.height_mm, self.width_mm)
+        return (self.width_mm, self.height_mm)
+
+    def turn_content(self, degrees: int) -> None:
+        """Turn the paper and every object together by degrees clockwise. Needs the
+        elements' measured sizes."""
+        delta = degrees % 360
         W, H = self.width_dots, self.height_dots
         for el in self.elements:
             nx, ny, _w, _h = rotate_rect(el.bounds(), W, H, delta)
@@ -340,7 +348,6 @@ class Label:
             el.x, el.y = round(nx), round(ny)
         if delta % 180:
             self.width_mm, self.height_mm = self.height_mm, self.width_mm
-        self.orientation = degrees % 360
 
     def variables(self) -> List[str]:
         """Variable names used anywhere in the label, in order of first use."""
