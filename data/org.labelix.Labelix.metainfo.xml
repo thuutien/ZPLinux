@@ -52,6 +52,11 @@
     <mediatype>application/x-labelix</mediatype>
   </provides>
   <releases>
+    <release version="0.4.2" date="2026-10-23">
+      <description>
+        <p>On the Label tab, Enter in a variable moves on to the next one.</p>
+      </description>
+    </release>
     <release version="0.4.1" date="2026-10-23">
       <description>
         <p>Objects can be moved partly or wholly off the label while designing; only the part on the label prints.</p>

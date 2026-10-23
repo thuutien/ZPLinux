@@ -150,6 +150,22 @@ def thumbnail(label: Label, values: dict, max_w: int, max_h: int):
     return surf
 
 
+def scroll_into_view(scrolled: Gtk.ScrolledWindow, widget: Gtk.Widget) -> None:
+    """Scroll a panel just enough that widget is visible."""
+    content = scrolled.get_child()
+    if isinstance(content, Gtk.Viewport):
+        content = content.get_child()
+    pos = widget.translate_coordinates(content, 0, 0)
+    if not pos:
+        return
+    top, bottom = pos[1] - 8, pos[1] + widget.get_allocated_height() + 8
+    adj = scrolled.get_vadjustment()
+    if top < adj.get_value():
+        adj.set_value(max(adj.get_lower(), top))
+    elif bottom > adj.get_value() + adj.get_page_size():
+        adj.set_value(min(adj.get_upper() - adj.get_page_size(), bottom - adj.get_page_size()))
+
+
 def barcode_type(el) -> str:
     """The Type list's id for a barcode or QR element."""
     if isinstance(el, Code128Element):
@@ -1702,6 +1718,7 @@ class Window(Gtk.ApplicationWindow):
             grid.attach(dim_label("Type {name} in any text, barcode or QR field to create a "
                                   "variable. Fill it in here, or print one label per row of a "
                                   "CSV file whose column headers match."), 0, 0, 2, 1)
+        entries = []
         for i, name in enumerate(names):
             grid.attach(Gtk.Label(label=name, xalign=0), 0, i, 1, 1)
             e = Gtk.Entry(text=str(self.values.get(name, "")), hexpand=True)
@@ -1713,8 +1730,17 @@ class Window(Gtk.ApplicationWindow):
                 self.values[n] = w.get_text()
                 self.mark_dirty()
             e.connect("changed", changed)
+            # Enter moves on to the next variable (from the last, back to the first)
+            e.connect("activate", lambda _w, i=i: self._focus_variable(entries, i + 1))
+            e.connect("focus-in-event", lambda w, _ev: scroll_into_view(self.label_box, w) and False)
+            entries.append(e)
             grid.attach(e, 1, i, 1, 1)
         grid.show_all()
+
+    def _focus_variable(self, entries, i):
+        target = entries[i % len(entries)]
+        target.grab_focus()
+        scroll_into_view(self.label_box, target)
 
     def _size_text(self):
         lab = self.label
