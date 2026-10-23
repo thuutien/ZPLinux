@@ -60,15 +60,15 @@ Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
 [releases page](https://github.com/thuutien/labelix/releases/latest):
 
 ```bash
-sudo apt install ./labelix_0.4.0_all.deb
+sudo apt install ./labelix_0.4.1_all.deb
 ```
 
-**Flatpak (any distribution)**: download `labelix-0.4.0.flatpak` from the
+**Flatpak (any distribution)**: download `labelix-0.4.1.flatpak` from the
 releases page and install it for your user. Flatpak fetches the GNOME runtime
 from Flathub if you don't have it yet:
 
 ```bash
-flatpak install --user ./labelix-0.4.0.flatpak
+flatpak install --user ./labelix-0.4.1.flatpak
 ```
 
 The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`), CUPS
