@@ -52,6 +52,14 @@
     <mediatype>application/x-zplinux</mediatype>
   </provides>
   <releases>
+    <release version="0.6.0" date="2026-10-23">
+      <description>
+        <ul>
+          <li>Rotate text, barcodes and images in 90 degree steps</li>
+          <li>Turn the whole design on screen for labels read sideways</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-10-23">
       <description>
         <p>Labelix is now ZPLinux. Labels save as .zplinux; .labelix files still open, and settings carry over from Labelix.</p>
