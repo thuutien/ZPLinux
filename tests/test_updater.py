@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from labelix import updater  # noqa: E402
+from zplinux import updater  # noqa: E402
 
 
 class UpdaterTests(unittest.TestCase):
@@ -26,9 +26,9 @@ class UpdaterTests(unittest.TestCase):
 
     def test_asset_for(self):
         rel = updater.Release("0.2.0", "u", assets={
-            "labelix_0.2.0_all.deb": ("x", "a"), "labelix-0.2.0.tar.gz": ("y", "b")})
-        self.assertEqual(updater.asset_for(rel, "deb"), "labelix_0.2.0_all.deb")
-        self.assertEqual(updater.asset_for(rel, "tarball"), "labelix-0.2.0.tar.gz")
+            "zplinux_0.2.0_all.deb": ("x", "a"), "zplinux-0.2.0.tar.gz": ("y", "b")})
+        self.assertEqual(updater.asset_for(rel, "deb"), "zplinux_0.2.0_all.deb")
+        self.assertEqual(updater.asset_for(rel, "tarball"), "zplinux-0.2.0.tar.gz")
         self.assertIsNone(updater.asset_for(rel, "manual"))
 
     def test_running_from_source_is_manual(self):
@@ -41,7 +41,7 @@ class UpdaterTests(unittest.TestCase):
 
     def test_tarball_with_path_traversal_rejected(self):
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "labelix-0.2.0.tar.gz")
+            path = os.path.join(d, "zplinux-0.2.0.tar.gz")
             with tarfile.open(path, "w:gz") as tar:
                 data = b"x"
                 info = tarfile.TarInfo("../evil.sh")

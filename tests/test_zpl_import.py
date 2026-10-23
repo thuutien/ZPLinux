@@ -8,8 +8,8 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from labelix import symbology, templates, zpl, zpl_import  # noqa: E402
-from labelix.model import (BarcodeElement, BoxElement, Code128Element,  # noqa: E402
+from zplinux import symbology, templates, zpl, zpl_import  # noqa: E402
+from zplinux.model import (BarcodeElement, BoxElement, Code128Element,  # noqa: E402
                            EllipseElement, ImageElement, Label, QRElement, TextElement)
 
 # Shaped like ZebraDesigner's "print to file" output: a printer set-up block, then

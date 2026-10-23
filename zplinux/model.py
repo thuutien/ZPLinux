@@ -299,7 +299,7 @@ class Label:
 
     def to_json(self) -> str:
         d = {
-            "format": "labelix",
+            "format": "zplinux",
             "version": 1,
             "width_mm": self.width_mm,
             "height_mm": self.height_mm,
@@ -316,8 +316,8 @@ class Label:
     @classmethod
     def from_json(cls, text: str) -> "Label":
         d = json.loads(text)
-        if d.get("format") != "labelix":
-            raise ValueError("Not a Labelix label file")
+        if d.get("format") not in ("zplinux", "labelix"):   # ZPLinux was called Labelix
+            raise ValueError("Not a ZPLinux label file")
         return cls(
             width_mm=float(d.get("width_mm", 101.6)),
             height_mm=float(d.get("height_mm", 152.4)),

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install (or uninstall with --uninstall) Labelix system-wide.
+# Install (or uninstall with --uninstall) ZPLinux system-wide.
 # Usage: sudo ./install.sh [--uninstall] [--prefix-root DIR] [--prefix /usr]
 set -e
 
@@ -16,17 +16,17 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-LIB="$ROOT$PREFIX/lib/labelix"
-SHARE="$ROOT$PREFIX/share/labelix"
-BIN="$ROOT$PREFIX/bin/labelix"
-FAKE="$ROOT$PREFIX/bin/labelix-fake-printer"
-DESKTOP="$ROOT$PREFIX/share/applications/labelix.desktop"
-ICON="$ROOT$PREFIX/share/icons/hicolor/scalable/apps/labelix.svg"
-MIME="$ROOT$PREFIX/share/mime/packages/labelix.xml"
+LIB="$ROOT$PREFIX/lib/zplinux"
+SHARE="$ROOT$PREFIX/share/zplinux"
+BIN="$ROOT$PREFIX/bin/zplinux"
+FAKE="$ROOT$PREFIX/bin/zplinux-fake-printer"
+DESKTOP="$ROOT$PREFIX/share/applications/zplinux.desktop"
+ICON="$ROOT$PREFIX/share/icons/hicolor/scalable/apps/zplinux.svg"
+MIME="$ROOT$PREFIX/share/mime/packages/zplinux.xml"
 
 if [ "$UNINSTALL" = 1 ]; then
     rm -rf "$LIB" "$SHARE" "$BIN" "$FAKE" "$DESKTOP" "$ICON" "$MIME"
-    echo "Labelix uninstalled."
+    echo "ZPLinux uninstalled."
     exit 0
 fi
 
@@ -40,20 +40,20 @@ fi
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 
-install -d "$LIB/labelix" "$SHARE/icons" "$(dirname "$BIN")"
-install -m 644 "$SRC"/labelix/*.py "$LIB/labelix/"
+install -d "$LIB/zplinux" "$SHARE/icons" "$(dirname "$BIN")"
+install -m 644 "$SRC"/zplinux/*.py "$LIB/zplinux/"
 install -m 644 "$SRC"/data/icons/*.svg "$SHARE/icons/"
-sed "s|/usr/lib/labelix|$PREFIX/lib/labelix|" "$SRC/data/labelix-launcher" > "$BIN"
+sed "s|/usr/lib/zplinux|$PREFIX/lib/zplinux|" "$SRC/data/zplinux-launcher" > "$BIN"
 chmod 755 "$BIN"
 sed '1s|.*|#!/usr/bin/python3|' "$SRC/tools/fake_printer.py" > "$FAKE"
 chmod 755 "$FAKE"
-install -D -m 644 "$SRC/data/labelix.desktop" "$DESKTOP"
-install -D -m 644 "$SRC/data/labelix.svg" "$ICON"
-install -D -m 644 "$SRC/data/labelix-mime.xml" "$MIME"
+install -D -m 644 "$SRC/data/zplinux.desktop" "$DESKTOP"
+install -D -m 644 "$SRC/data/zplinux.svg" "$ICON"
+install -D -m 644 "$SRC/data/zplinux-mime.xml" "$MIME"
 
 if [ "$SYSTEM" = 1 ]; then
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true
     command -v update-desktop-database >/dev/null && update-desktop-database -q /usr/share/applications || true
     command -v update-mime-database >/dev/null && update-mime-database /usr/share/mime || true
-    echo "Labelix installed. Launch it from the menu (Office > Labelix) or run: labelix"
+    echo "ZPLinux installed. Launch it from the menu (Office > ZPLinux) or run: zplinux"
 fi
