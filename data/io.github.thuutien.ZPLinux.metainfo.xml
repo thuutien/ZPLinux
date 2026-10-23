@@ -52,6 +52,11 @@
     <mediatype>application/x-zplinux</mediatype>
   </provides>
   <releases>
+    <release version="0.5.0" date="2026-10-23">
+      <description>
+        <p>Labelix is now ZPLinux. Labels save as .zplinux; .labelix files still open, and settings carry over from Labelix.</p>
+      </description>
+    </release>
     <release version="0.4.2" date="2026-10-23">
       <description>
         <p>On the Label tab, Enter in a variable moves on to the next one.</p>
