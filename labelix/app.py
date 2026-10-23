@@ -34,9 +34,11 @@ from .widgets import CSS, PropertyForm, Toast, dim_label, icon_button  # noqa: E
 
 SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "labelix", "settings.json")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FLATPAK = os.path.exists("/.flatpak-info")
 INSTALLED = HERE.startswith("/usr/")
 # How to start the bundled fake printer: an installed command, or the script in the source tree.
-FAKE_PRINTER_CMD = ("labelix-fake-printer --render" if INSTALLED
+FAKE_PRINTER_CMD = (f"flatpak run --command=labelix-fake-printer {APP_ID} --render" if FLATPAK
+                    else "labelix-fake-printer --render" if INSTALLED
                     else "python3 tools/fake_printer.py --render")
 MAX_RECENT = 8
 PRINTER_ICONS = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
@@ -2231,7 +2233,7 @@ class App(Gtk.Application):
         # Labelix's own icons: from the source tree, or where install.sh puts them.
         theme = Gtk.IconTheme.get_default()
         for d in (os.path.join(HERE, "data", "icons"), os.path.join(HERE, "data"),
-                  "/usr/share/labelix/icons"):
+                  os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "labelix", "icons")):
             if os.path.isdir(d):
                 theme.append_search_path(d)
 

@@ -1,0 +1,66 @@
+# Flatpak build of Labelix.
+#   flatpak-builder --user --install --force-clean build packaging/flatpak/org.labelix.Labelix.yml
+# or build a single-file bundle with packaging/build-flatpak.sh
+app-id: org.labelix.Labelix
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: labelix
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  # network printers (TCP 9100) and the update check
+  - --share=network
+  # USB printers (/dev/usb/lp*)
+  - --device=all
+  # CUPS raw queues
+  - --socket=cups
+  # labels, images and CSV files anywhere in the home folder
+  - --filesystem=home
+
+modules:
+  # Only the lp and lpstat commands, which Labelix uses for raw CUPS queues.
+  # They talk to the host's CUPS through --socket=cups.
+  - name: cups-client
+    buildsystem: simple
+    build-commands:
+      - ./configure --prefix=/app --disable-shared --disable-gssapi --disable-dbus
+        --disable-libusb --disable-pam --with-tls=gnutls
+      - make -C cups -j${FLATPAK_BUILDER_N_JOBS} libs
+      - make -C systemv lp lpstat
+      - install -Dm755 systemv/lp /app/bin/lp
+      - install -Dm755 systemv/lpstat /app/bin/lpstat
+    sources:
+      - type: archive
+        url: https://github.com/OpenPrinting/cups/releases/download/v2.4.20/cups-2.4.20-source.tar.gz
+        sha256: ab4d9cd7f3e58060091d2b24972223d6401675f11c49b65abf4f6ef31dea22ff
+
+  - name: python3-qrcode
+    buildsystem: simple
+    build-commands:
+      - pip3 install --no-deps --no-build-isolation --prefix=${FLATPAK_DEST} qrcode-8.2-py3-none-any.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl
+        sha256: 16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f
+
+  - name: labelix
+    buildsystem: simple
+    build-commands:
+      - sh install.sh --prefix /app
+      # Flatpak exports desktop files, icons and MIME types named after the app id.
+      - mv /app/share/applications/labelix.desktop /app/share/applications/org.labelix.Labelix.desktop
+      - sed -i 's/^Icon=labelix$/Icon=org.labelix.Labelix/' /app/share/applications/org.labelix.Labelix.desktop
+      - mv /app/share/icons/hicolor/scalable/apps/labelix.svg /app/share/icons/hicolor/scalable/apps/org.labelix.Labelix.svg
+      - sed 's|<icon name="labelix"/>|<icon name="org.labelix.Labelix"/>|' /app/share/mime/packages/labelix.xml > /app/share/mime/packages/org.labelix.Labelix.xml
+      - rm /app/share/mime/packages/labelix.xml
+      - install -Dm644 data/org.labelix.Labelix.metainfo.xml /app/share/metainfo/org.labelix.Labelix.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - build
+          - dist
+          - .flatpak-builder

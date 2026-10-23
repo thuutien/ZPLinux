@@ -47,8 +47,19 @@ Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
 [releases page](https://github.com/thuutien/labelix/releases/latest):
 
 ```bash
-sudo apt install ./labelix_0.1.1_all.deb
+sudo apt install ./labelix_0.2.0_all.deb
 ```
+
+**Flatpak (any distribution)**: download `labelix-0.2.0.flatpak` from the
+releases page and install it for your user. Flatpak fetches the GNOME runtime
+from Flathub if you don't have it yet:
+
+```bash
+flatpak install --user ./labelix-0.2.0.flatpak
+```
+
+The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`), CUPS
+and your home folder. To build it yourself, run `packaging/build-flatpak.sh`.
 
 **Arch / Manjaro**: build from `packaging/arch/PKGBUILD` with `makepkg -si`.
 
@@ -72,6 +83,8 @@ exists, a bar at the top of the window offers to install it:
   file, checks it against the SHA-256 checksum GitHub publishes, and installs
   it with `pkexec` (you'll be asked for your password), then offers to restart.
 - **AUR / other package managers**: update through the package manager.
+- **Flatpak**: the bar links to the release page; install the new
+  `.flatpak` file the same way as the first one.
 - **Running from source**: the bar links to the release page.
 
 For this to work, each GitHub release (tag `v<version>`) needs
@@ -82,6 +95,7 @@ For this to work, each GitHub release (tag `v<version>`) needs
 ```bash
 ./packaging/build-tarball.sh   # dist/labelix-<version>.tar.gz (prints its sha256)
 ./packaging/build-deb.sh       # dist/labelix_<version>_all.deb
+./packaging/build-flatpak.sh   # dist/labelix-<version>.flatpak (needs flatpak-builder)
 ```
 
 The PKGBUILD downloads `labelix-<version>.tar.gz` from the GitHub release
