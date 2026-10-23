@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>org.labelix.Labelix</id>
-  <name>Labelix</name>
+  <id>io.github.thuutien.ZPLinux</id>
+  <name>ZPLinux</name>
   <summary>Design and print labels for Zebra and other ZPL printers</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
@@ -10,7 +10,7 @@
   </developer>
   <description>
     <p>
-      Labelix is a WYSIWYG label designer for Zebra and other thermal printers
+      ZPLinux is a WYSIWYG label designer for Zebra and other thermal printers
       that understand ZPL. Lay out a label and print it over the network, to a
       USB printer, through a raw CUPS queue, or save the ZPL to a file.
     </p>
@@ -26,30 +26,30 @@
       <li>Import ZPL, such as ZebraDesigner's print-to-file output</li>
     </ul>
   </description>
-  <launchable type="desktop-id">org.labelix.Labelix.desktop</launchable>
-  <url type="homepage">https://github.com/thuutien/labelix</url>
-  <url type="bugtracker">https://github.com/thuutien/labelix/issues</url>
+  <launchable type="desktop-id">io.github.thuutien.ZPLinux.desktop</launchable>
+  <url type="homepage">https://github.com/thuutien/ZPLinux</url>
+  <url type="bugtracker">https://github.com/thuutien/ZPLinux/issues</url>
   <screenshots>
     <screenshot type="default">
       <caption>Editing a product label</caption>
-      <image>https://raw.githubusercontent.com/thuutien/labelix/main/docs/screenshots/editor.png</image>
+      <image>https://raw.githubusercontent.com/thuutien/ZPLinux/main/docs/screenshots/editor.png</image>
     </screenshot>
     <screenshot>
       <caption>Start screen with templates</caption>
-      <image>https://raw.githubusercontent.com/thuutien/labelix/main/docs/screenshots/welcome.png</image>
+      <image>https://raw.githubusercontent.com/thuutien/ZPLinux/main/docs/screenshots/welcome.png</image>
     </screenshot>
     <screenshot>
       <caption>Shipping label with variables</caption>
-      <image>https://raw.githubusercontent.com/thuutien/labelix/main/docs/screenshots/variables.png</image>
+      <image>https://raw.githubusercontent.com/thuutien/ZPLinux/main/docs/screenshots/variables.png</image>
     </screenshot>
     <screenshot>
       <caption>Generated ZPL</caption>
-      <image>https://raw.githubusercontent.com/thuutien/labelix/main/docs/screenshots/zpl.png</image>
+      <image>https://raw.githubusercontent.com/thuutien/ZPLinux/main/docs/screenshots/zpl.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1"/>
   <provides>
-    <mediatype>application/x-labelix</mediatype>
+    <mediatype>application/x-zplinux</mediatype>
   </provides>
   <releases>
     <release version="0.4.2" date="2026-10-23">

@@ -1,6 +1,6 @@
 """Tests for the extra barcode types. Run: python3 -m unittest discover tests
 
-The preview tests need the zint command (or LABELIX_ZINT pointing at one) and are
+The preview tests need the zint command (or ZPLINUX_ZINT pointing at one) and are
 skipped without it; the ZPL the printer gets does not depend on zint.
 """
 
@@ -10,8 +10,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from labelix import symbology, zint, zpl  # noqa: E402
-from labelix.model import BarcodeElement, Label, element_from_dict  # noqa: E402
+from zplinux import symbology, zint, zpl  # noqa: E402
+from zplinux.model import BarcodeElement, Label, element_from_dict  # noqa: E402
 
 needs_zint = unittest.skipUnless(zint.available(), "zint is not installed")
 
@@ -93,7 +93,7 @@ class ZintSvgTests(unittest.TestCase):
 class PreviewTests(unittest.TestCase):
     def draw(self, el):
         import cairo
-        from labelix import render
+        from zplinux import render
         surf = cairo.ImageSurface(cairo.FORMAT_RGB24, 800, 600)
         render.draw_label(cairo.Context(surf), Label(width_mm=100, height_mm=75, elements=[el]))
         return el

@@ -1,10 +1,15 @@
-# Labelix
+# ZPLinux
 
-[![Latest release](https://img.shields.io/github/v/release/thuutien/labelix)](https://github.com/thuutien/labelix/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/thuutien/ZPLinux)](https://github.com/thuutien/ZPLinux/releases/latest)
 
 A WYSIWYG label designer for **Zebra and other ZPL thermal printers** on Linux,
 built with Python + GTK3. Zebra's own ZebraDesigner only runs on Windows;
-Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
+ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
+
+> ZPLinux was called **Labelix** up to version 0.4.2. Labelix can't update itself
+> to ZPLinux: install ZPLinux from the [releases page](https://github.com/thuutien/ZPLinux/releases/latest)
+> (the `.deb` replaces the Labelix package). Your printers and recent files carry
+> over, and `.labelix` files still open.
 
 <p align="center">
   <img src="docs/screenshots/editor.png" alt="Editing a product label" width="80%">
@@ -48,27 +53,27 @@ Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
   through a raw CUPS queue, or to a `.zpl` file, with a connection test
 - **Import ZPL**: open `.prn` / `.zpl` files, such as ZebraDesigner's "print to
   file" output, as editable labels
-- Drop images, `.labelix` or ZPL files onto the window
+- Drop images, `.zplinux` or ZPL files onto the window
 - Undo/redo, keyboard shortcuts (Ctrl+? lists them), light and dark themes
 - **Update check**: looks for new GitHub releases once a day (can be turned off
   in Preferences) and can download, verify and install them for you
-- Labels are saved as `.labelix` JSON files with images embedded
+- Labels are saved as `.zplinux` JSON files with images embedded
 
 ## Install
 
 **Debian / Ubuntu / Mint**: install the `.deb` from the
-[releases page](https://github.com/thuutien/labelix/releases/latest):
+[releases page](https://github.com/thuutien/ZPLinux/releases/latest):
 
 ```bash
-sudo apt install ./labelix_0.4.2_all.deb
+sudo apt install ./zplinux_0.4.2_all.deb
 ```
 
-**Flatpak (any distribution)**: download `labelix-0.4.2.flatpak` from the
+**Flatpak (any distribution)**: download `zplinux-0.4.2.flatpak` from the
 releases page and install it for your user. Flatpak fetches the GNOME runtime
 from Flathub if you don't have it yet:
 
 ```bash
-flatpak install --user ./labelix-0.4.2.flatpak
+flatpak install --user ./zplinux-0.4.2.flatpak
 ```
 
 The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`), CUPS
@@ -83,16 +88,16 @@ sudo ./install.sh
 ```
 
 Uninstall with `sudo ./install.sh --uninstall`. Installing also adds the
-`labelix-fake-printer` command (see below) and makes `.labelix` files open in
-Labelix.
+`zplinux-fake-printer` command (see below) and makes `.zplinux` files open in
+ZPLinux.
 
 ### Updates
 
-Labelix asks GitHub for the latest release at most once a day (turn this off
+ZPLinux asks GitHub for the latest release at most once a day (turn this off
 in Preferences, or use **Check for Updates** in the menu). When a newer version
 exists, a bar at the top of the window offers to install it:
 
-- **.deb and `install.sh` installs**: Labelix downloads the matching release
+- **.deb and `install.sh` installs**: ZPLinux downloads the matching release
   file, checks it against the SHA-256 checksum GitHub publishes, and installs
   it with `pkexec` (you'll be asked for your password), then offers to restart.
 - **AUR / other package managers**: update through the package manager.
@@ -101,17 +106,17 @@ exists, a bar at the top of the window offers to install it:
 - **Running from source**: the bar links to the release page.
 
 For this to work, each GitHub release (tag `v<version>`) needs
-`labelix_<version>_all.deb` and `labelix-<version>.tar.gz` attached.
+`zplinux_<version>_all.deb` and `zplinux-<version>.tar.gz` attached.
 
 ### Building the packages
 
 ```bash
-./packaging/build-tarball.sh   # dist/labelix-<version>.tar.gz (prints its sha256)
-./packaging/build-deb.sh       # dist/labelix_<version>_all.deb
-./packaging/build-flatpak.sh   # dist/labelix-<version>.flatpak (needs flatpak-builder)
+./packaging/build-tarball.sh   # dist/zplinux-<version>.tar.gz (prints its sha256)
+./packaging/build-deb.sh       # dist/zplinux_<version>_all.deb
+./packaging/build-flatpak.sh   # dist/zplinux-<version>.flatpak (needs flatpak-builder)
 ```
 
-The PKGBUILD downloads `labelix-<version>.tar.gz` from the GitHub release
+The PKGBUILD downloads `zplinux-<version>.tar.gz` from the GitHub release
 `v<version>`. After uploading it, put the checksum from `build-tarball.sh` in
 `sha256sums`, run `makepkg --printsrcinfo > .SRCINFO`, and push both to the AUR.
 
@@ -123,10 +128,10 @@ draws the barcode types other than Code 128 and QR. Labels print the same
 without them.
 
 ```bash
-python3 labelix.py
+python3 zplinux.py
 ```
 
-Open the example: `python3 labelix.py examples/product.labelix`
+Open the example: `python3 zplinux.py examples/product.zplinux`
 
 ### Dependencies by distribution
 
@@ -142,7 +147,7 @@ Open the example: `python3 labelix.py examples/product.labelix`
 on port 9100 and saves every job it receives into `received/`:
 
 ```bash
-python3 tools/fake_printer.py --render     # or, when installed: labelix-fake-printer --render
+python3 tools/fake_printer.py --render     # or, when installed: zplinux-fake-printer --render
 ```
 
 With `--render` it also sends each job to the free
@@ -150,7 +155,7 @@ With `--render` it also sends each job to the free
 real printer would print (use `--dpmm 12` for 300 dpi and `--size 4x2` for the
 label size in inches). Leave `--render` off to keep everything offline.
 
-In Labelix, the default printer is already `127.0.0.1:9100`, so pressing
+In ZPLinux, the default printer is already `127.0.0.1:9100`, so pressing
 **Print** sends the job to the fake printer.
 
 You can also paste the ZPL from the ZPL tab into the
@@ -159,7 +164,7 @@ You can also paste the ZPL from the ZPL tab into the
 ## Connecting a real printer
 
 Open **Printers…** (in the menu next to Print) to add as many printers as you
-like, give each a name, and mark one as the **default**. Labelix prints to the
+like, give each a name, and mark one as the **default**. ZPLinux prints to the
 default printer; the menu next to Print lets you pick another one for this
 session. Each printer connects in one of these ways:
 
@@ -167,28 +172,28 @@ session. Each printer connects in one of these ways:
 - **USB device file**: usually `/dev/usb/lp0`. Your user needs to be in the
   `lp` group: `sudo usermod -aG lp $USER`, then log out and back in.
 - **CUPS printer (raw)**: add the printer in CUPS as a *Raw* queue (no driver)
-  so the ZPL reaches it unchanged; Labelix sends with `lp -o raw`.
+  so the ZPL reaches it unchanged; ZPLinux sends with `lp -o raw`.
 
 ## Importing from ZebraDesigner
 
-Labelix can't read ZebraDesigner's `.nlbl` files, but it can import the ZPL
+ZPLinux can't read ZebraDesigner's `.nlbl` files, but it can import the ZPL
 that ZebraDesigner sends to the printer:
 
 1. In ZebraDesigner, print the label to a file instead of to the printer.
    This saves the ZPL as a `.prn` file.
-2. In Labelix, **Open** the `.prn` file (or drop it onto the window). It opens
-   in a new tab as an unsaved label; save it as a `.labelix` file.
+2. In ZPLinux, **Open** the `.prn` file (or drop it onto the window). It opens
+   in a new tab as an unsaved label; save it as a `.zplinux` file.
 
 Text, barcodes of every type in the list above, boxes, lines, ellipses and
-graphics come back as editable elements. Some things change, and Labelix lists them after the import
+graphics come back as editable elements. Some things change, and ZPLinux lists them after the import
 (the **Details** button):
 
 - Printer fonts other than font 0 and TrueType fonts become font 0 at the same size.
 - Rotated text and barcodes come in upright.
-- TLC39 barcodes, which Labelix doesn't make, become Code 128.
+- TLC39 barcodes, which ZPLinux doesn't make, become Code 128.
 - Variables come in as the sample values ZebraDesigner printed; numbered
   fields (`^FN`) become variables named `field1`, `field2` ...
-- ZPL doesn't say the printer's resolution, so Labelix assumes 203 dpi (as on
+- ZPL doesn't say the printer's resolution, so ZPLinux assumes 203 dpi (as on
   a GK420d) unless the label is wider than 4.1 inches. Change it on the Label tab.
 
 ## How the preview relates to the printer
@@ -218,18 +223,18 @@ python3 -m unittest discover tests
 ## Project layout
 
 ```
-labelix/model.py     label and element data, units, JSON, {variables}
-labelix/zpl.py       ZPL generation
-labelix/render.py    Cairo preview rendering
-labelix/barcode.py   Code 128 / QR encoders for the preview
-labelix/symbology.py the other barcode types: ZPL commands and zint settings
-labelix/zint.py      runs zint for the preview of those types
-labelix/printing.py  network / USB / CUPS / file output
-labelix/templates.py templates on the start screen
-labelix/updater.py   GitHub release check and self-update
-labelix/canvas.py    design surface: selection, dragging, snapping
-labelix/widgets.py   property cards, toasts, CSS
-labelix/app.py       main window
-data/icons/          Labelix's own symbolic icons
+zplinux/model.py     label and element data, units, JSON, {variables}
+zplinux/zpl.py       ZPL generation
+zplinux/render.py    Cairo preview rendering
+zplinux/barcode.py   Code 128 / QR encoders for the preview
+zplinux/symbology.py the other barcode types: ZPL commands and zint settings
+zplinux/zint.py      runs zint for the preview of those types
+zplinux/printing.py  network / USB / CUPS / file output
+zplinux/templates.py templates on the start screen
+zplinux/updater.py   GitHub release check and self-update
+zplinux/canvas.py    design surface: selection, dragging, snapping
+zplinux/widgets.py   property cards, toasts, CSS
+zplinux/app.py       main window
+data/icons/          ZPLinux's own symbolic icons
 tools/fake_printer.py  stand-in printer for testing
 ```

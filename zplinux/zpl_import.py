@@ -1,6 +1,6 @@
 """Read ZPL II (for example a ZebraDesigner "print to file" .prn) back into a Label.
 
-Only what Labelix can edit comes back as elements: font 0 text, Code 128 and QR
+Only what ZPLinux can edit comes back as elements: font 0 text, Code 128 and QR
 codes, boxes, lines, ellipses and graphics. Everything else is reported in
 `ImportResult.warnings` so the user knows what changed.
 """
@@ -44,7 +44,7 @@ BARCODE_NAMES = {
     "BM": "MSI", "BO": "Aztec", "BP": "Plessey", "BR": "GS1 DataBar", "BS": "UPC/EAN extension",
     "BT": "TLC39", "BU": "UPC-A", "BX": "Data Matrix", "BZ": "POSTAL",
 }
-# ^Bx commands Labelix reads as its own barcode types (symbology keys).
+# ^Bx commands ZPLinux reads as its own barcode types (symbology keys).
 COMMAND_KEYS = {
     "B1": "code11", "B2": "i2of5", "B3": "code39", "B4": "code49", "B5": "planet",
     "B7": "pdf417", "B8": "ean8", "B9": "upce", "BA": "code93", "BB": "codablock",
@@ -418,13 +418,13 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
             continue
         prev = label.elements[-1] if label.elements else None
         if _is_barcode_text(prev, el):
-            # Labelix writes a barcode with its own text size as the barcode plus this line.
+            # ZPLinux writes a barcode with its own text size as the barcode plus this line.
             prev.show_text, prev.text_size = True, el.height
             continue
         label.elements.append(el)
 
     if not label.elements:
-        raise ZplImportError("The label has nothing Labelix can show (no text, codes, "
+        raise ZplImportError("The label has nothing ZPLinux can show (no text, codes, "
                              "boxes or graphics).")
 
     bottom = max(_bottom(e) for e in label.elements)
@@ -458,7 +458,7 @@ def gs1_parens(data: str, escape: str = "~") -> str:
 
 
 def _barcode(f: _Field, data: str, note) -> BarcodeElement:
-    """A ^Bx command as a BarcodeElement, reading the settings Labelix uses."""
+    """A ^Bx command as a BarcodeElement, reading the settings ZPLinux uses."""
     key, cmd = COMMAND_KEYS[f.kind], f.kind
     p = [v.strip() for v in f.params.split(",")]
     arg = lambda i: p[i] if i < len(p) else ""
@@ -656,7 +656,7 @@ def _element(f: _Field, default_font, graphics, values, note):
         return _barcode(f, data, note)
 
     if f.kind in BARCODE_NAMES:
-        note(f"{BARCODE_NAMES[f.kind]} barcodes became Code 128; Labelix doesn't make "
+        note(f"{BARCODE_NAMES[f.kind]} barcodes became Code 128; ZPLinux doesn't make "
              "them.")
         i = HEIGHT_PARAM.get(f.kind, 1)
         h = _ints(",".join(f.params.split(",")[i:i + 1]), 1)[0] or bar_height

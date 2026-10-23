@@ -1,4 +1,4 @@
-"""Check GitHub for new Labelix releases and install them.
+"""Check GitHub for new ZPLinux releases and install them.
 
 The check and download run as the user; only the final install step is run
 through pkexec. Downloads are verified against the SHA-256 digest that the
@@ -21,11 +21,11 @@ from typing import Dict, List, Optional, Tuple
 
 from . import __version__
 
-REPO = "thuutien/labelix"
+REPO = "thuutien/ZPLinux"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 DOWNLOAD_PREFIX = f"https://github.com/{REPO}/releases/download/"
-INSTALL_DIR = "/usr/lib/labelix"
+INSTALL_DIR = "/usr/lib/zplinux"
 TIMEOUT = 15
 
 
@@ -62,7 +62,7 @@ def due(last_check: float, now: Optional[float] = None) -> bool:
 
 def _open(url: str):
     req = urllib.request.Request(url, headers={
-        "User-Agent": f"labelix/{__version__}",
+        "User-Agent": f"zplinux/{__version__}",
         "Accept": "application/vnd.github+json",
     })
     return urllib.request.urlopen(req, timeout=TIMEOUT)
@@ -98,10 +98,10 @@ def _owned_by(cmd: List[str]) -> bool:
 
 
 def install_method() -> str:
-    """How this copy of Labelix was installed.
+    """How this copy of ZPLinux was installed.
 
     "deb"     - Debian package, can be upgraded with apt
-    "tarball" - install.sh into /usr/lib/labelix, can be upgraded the same way
+    "tarball" - install.sh into /usr/lib/zplinux, can be upgraded the same way
     "package" - owned by another package manager (rpm, pacman/AUR)
     "flatpak" - Flatpak bundle; the user installs the new bundle
     "manual"  - running from source; the user updates it
@@ -112,20 +112,20 @@ def install_method() -> str:
     if os.environ.get("APPIMAGE") or here != INSTALL_DIR:
         return "manual"
     if shutil.which("dpkg-query"):
-        status = subprocess.run(["dpkg-query", "-W", "-f=${Status}", "labelix"],
+        status = subprocess.run(["dpkg-query", "-W", "-f=${Status}", "zplinux"],
                                 capture_output=True, text=True).stdout
         if status.endswith(" installed"):
             return "deb"
-    if _owned_by(["rpm", "-q", "labelix"]) or _owned_by(["pacman", "-Qq", "labelix"]):
+    if _owned_by(["rpm", "-q", "zplinux"]) or _owned_by(["pacman", "-Qq", "zplinux"]):
         return "package"
     return "tarball"
 
 
 def asset_for(rel: Release, method: str) -> Optional[str]:
     if method == "deb":
-        name = f"labelix_{rel.version}_all.deb"
+        name = f"zplinux_{rel.version}_all.deb"
     elif method == "tarball":
-        name = f"labelix-{rel.version}.tar.gz"
+        name = f"zplinux-{rel.version}.tar.gz"
     else:
         return None
     return name if name in rel.assets else None

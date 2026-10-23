@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
-Name=Labelix
+Name=ZPLinux
 GenericName=Label Designer
 Comment=Design and print labels for Zebra and other ZPL thermal printers
-Exec=labelix %f
-Icon=labelix
+Exec=zplinux %f
+Icon=zplinux
 Terminal=false
 Categories=Office;GTK;
 Keywords=label;zpl;zebra;barcode;qr;thermal;printer;
-MimeType=application/x-labelix;
+MimeType=application/x-zplinux;
 StartupNotify=true

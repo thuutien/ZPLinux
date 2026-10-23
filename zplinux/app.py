@@ -1,4 +1,4 @@
-"""Labelix GTK3 user interface: a WYSIWYG designer for ZPL labels."""
+"""ZPLinux GTK3 user interface: a WYSIWYG designer for ZPL labels."""
 
 from __future__ import annotations
 
@@ -34,16 +34,22 @@ from . import symbology, zint  # noqa: E402
 from .templates import TEMPLATES  # noqa: E402
 from .widgets import CSS, PropertyForm, Toast, dim_label, icon_button  # noqa: E402
 
-SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "labelix", "settings.json")
+SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "zplinux", "settings.json")
+# ZPLinux was called Labelix; its settings (printers, recent files) are copied over once,
+# from a normal install or from the Labelix Flatpak.
+OLD_SETTINGS_FILES = (
+    os.path.join(GLib.get_user_config_dir(), "labelix", "settings.json"),
+    os.path.expanduser("~/.var/app/org.labelix.Labelix/config/labelix/settings.json"),
+)
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FLATPAK = os.path.exists("/.flatpak-info")
 INSTALLED = HERE.startswith("/usr/")
 # How to start the bundled fake printer: an installed command, or the script in the source tree.
-FAKE_PRINTER_CMD = (f"flatpak run --command=labelix-fake-printer {APP_ID} --render" if FLATPAK
-                    else "labelix-fake-printer --render" if INSTALLED
+FAKE_PRINTER_CMD = (f"flatpak run --command=zplinux-fake-printer {APP_ID} --render" if FLATPAK
+                    else "zplinux-fake-printer --render" if INSTALLED
                     else "python3 tools/fake_printer.py --render")
 MAX_RECENT = 8
-LABEL_EXTENSIONS = (".labelix", ".json")
+LABEL_EXTENSIONS = (".zplinux", ".labelix", ".json")   # .labelix: from before the rename
 ZPL_EXTENSIONS = (".zpl", ".prn")    # ZebraDesigner "print to file" writes .prn
 PRINTER_ICONS = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
                  "cups": "printer-symbolic", "file": "text-x-generic-symbolic"}
@@ -64,13 +70,13 @@ SIZE_PRESETS = [
 ]
 
 KIND_ICONS = {
-    "text": "labelix-text-symbolic",
-    "code128": "labelix-barcode-symbolic",
-    "qr": "labelix-qr-symbolic",
-    "barcode": "labelix-barcode-symbolic",
-    "box": "labelix-box-symbolic",
-    "ellipse": "labelix-ellipse-symbolic",
-    "image": "labelix-image-symbolic",
+    "text": "zplinux-text-symbolic",
+    "code128": "zplinux-barcode-symbolic",
+    "qr": "zplinux-qr-symbolic",
+    "barcode": "zplinux-barcode-symbolic",
+    "box": "zplinux-box-symbolic",
+    "ellipse": "zplinux-ellipse-symbolic",
+    "image": "zplinux-image-symbolic",
 }
 TOOLS = [("text", "Text"), ("code128", "Barcode"), ("qr", "QR code"),
          ("box", "Box"), ("ellipse", "Ellipse"), ("image", "Image")]
@@ -122,6 +128,13 @@ def _shortcut_rows(rows):
 
 
 def load_settings() -> dict:
+    old = next((p for p in OLD_SETTINGS_FILES if os.path.exists(p)), None)
+    if old and not os.path.exists(SETTINGS_FILE):
+        try:
+            os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+            shutil.copyfile(old, SETTINGS_FILE)
+        except OSError:
+            pass
     try:
         with open(SETTINGS_FILE) as f:
             return json.load(f)
@@ -220,7 +233,7 @@ class Window(Gtk.ApplicationWindow):
     def __init__(self, app, path: Optional[str] = None):
         super().__init__(application=app, title=APP_NAME)
         self.set_default_size(1320, 860)
-        self.set_icon_name("labelix")
+        self.set_icon_name("zplinux")
         self.settings = load_settings()
         self.printers, self.default_printer = printing.load_printers(self.settings)
         self.printer = self.printers[self.default_printer]   # where Print sends jobs
@@ -533,7 +546,7 @@ class Window(Gtk.ApplicationWindow):
         scroll.add(outer)
 
         hero = Gtk.Box(spacing=16, halign=Gtk.Align.START)
-        logo = Gtk.Image.new_from_icon_name("labelix", Gtk.IconSize.DIALOG)
+        logo = Gtk.Image.new_from_icon_name("zplinux", Gtk.IconSize.DIALOG)
         logo.set_pixel_size(64)
         hero.pack_start(logo, False, False, 0)
         tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, spacing=2)
@@ -896,7 +909,7 @@ class Window(Gtk.ApplicationWindow):
         dlg = Gtk.FileChooserNative.new("Open Label", self, Gtk.FileChooserAction.OPEN, None, None)
         dlg.set_select_multiple(True)
         for name, exts in (("Labels and ZPL files", LABEL_EXTENSIONS + ZPL_EXTENSIONS),
-                           ("Labelix labels (*.labelix)", LABEL_EXTENSIONS),
+                           ("ZPLinux labels (*.zplinux)", LABEL_EXTENSIONS),
                            ("ZPL from ZebraDesigner and others (*.prn, *.zpl)", ZPL_EXTENSIONS)):
             f = Gtk.FileFilter()
             f.set_name(name)
@@ -985,11 +998,11 @@ class Window(Gtk.ApplicationWindow):
         return True
 
     def save_as(self) -> bool:
-        path = self.choose_save("Save Label", "label.labelix", ("Labelix labels", "*.labelix"))
+        path = self.choose_save("Save Label", "label.zplinux", ("ZPLinux labels", "*.zplinux"))
         if not path:
             return False
         if not path.endswith(LABEL_EXTENSIONS):
-            path += ".labelix"
+            path += ".zplinux"
         self.path = path
         return self.save()
 
@@ -1082,7 +1095,7 @@ class Window(Gtk.ApplicationWindow):
             self.select(added)
             self.structure_changed()
         elif paths:
-            self.notify("Only images, .labelix and ZPL (.prn, .zpl) files can be dropped here.")
+            self.notify("Only images, .zplinux and ZPL (.prn, .zpl) files can be dropped here.")
 
     # ---- history ------------------------------------------------------------
 
@@ -1509,7 +1522,7 @@ class Window(Gtk.ApplicationWindow):
             g = Gtk.Box(homogeneous=True)
             g.get_style_context().add_class("linked")
             for where in group:
-                g.pack_start(icon_button(f"labelix-align-{where}-symbolic", tips[where],
+                g.pack_start(icon_button(f"zplinux-align-{where}-symbolic", tips[where],
                                          lambda w=where: self.align(w), flat=False), True, True, 0)
             align.pack_start(g, True, True, 0)
         form.widget(align)
@@ -2353,7 +2366,7 @@ class Window(Gtk.ApplicationWindow):
             GLib.idle_add(self.update_text.set_text, f"Downloading {asset}… {int(frac * 100)}%")
 
         def work():
-            tmp = tempfile.mkdtemp(prefix="labelix-update-")
+            tmp = tempfile.mkdtemp(prefix="zplinux-update-")
             try:
                 path = updater.download(rel, asset, tmp, progress)
                 cmd = updater.install_command(method, path, tmp)
@@ -2412,7 +2425,7 @@ class Window(Gtk.ApplicationWindow):
 
     def about(self):
         dlg = Gtk.AboutDialog(transient_for=self, modal=True, program_name=APP_NAME,
-                              version=__version__, logo_icon_name="labelix",
+                              version=__version__, logo_icon_name="zplinux",
                               comments="Design and print labels for Zebra and other ZPL "
                                        "thermal printers.",
                               website=f"https://github.com/{updater.REPO}",
@@ -2429,10 +2442,10 @@ class App(Gtk.Application):
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
-        # Labelix's own icons: from the source tree, or where install.sh puts them.
+        # ZPLinux's own icons: from the source tree, or where install.sh puts them.
         theme = Gtk.IconTheme.get_default()
         for d in (os.path.join(HERE, "data", "icons"), os.path.join(HERE, "data"),
-                  os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "labelix", "icons")):
+                  os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "zplinux", "icons")):
             if os.path.isdir(d):
                 theme.append_search_path(d)
 

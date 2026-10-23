@@ -11,8 +11,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from labelix import barcode, printing, zpl  # noqa: E402
-from labelix.model import (BoxElement, Code128Element, ImageElement, Label, QRElement,  # noqa: E402
+from zplinux import barcode, printing, zpl  # noqa: E402
+from zplinux.model import (BoxElement, Code128Element, ImageElement, Label, QRElement,  # noqa: E402
                            TextElement)
 
 # 2x2 PNG: black, white / white, black
@@ -90,6 +90,15 @@ class ZplTests(unittest.TestCase):
         self.assertEqual(out.count("^XA"), 2)
         self.assertIn("^FD1^FS", out)
         self.assertIn("^FD2^FS", out)
+
+
+class RenameTests(unittest.TestCase):
+    def test_files_saved_as_labelix_still_open(self):
+        old = Label(elements=[TextElement(text="Hi")]).to_json().replace(
+            '"format": "zplinux"', '"format": "labelix"')
+        self.assertEqual(Label.from_json(old).elements[0].text, "Hi")
+        with self.assertRaises(ValueError):
+            Label.from_json('{"format": "something else"}')
 
 
 class OffLabelTests(unittest.TestCase):

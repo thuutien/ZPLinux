@@ -1,11 +1,11 @@
-# Flatpak build of Labelix.
-#   flatpak-builder --user --install --force-clean build packaging/flatpak/org.labelix.Labelix.yml
+# Flatpak build of ZPLinux.
+#   flatpak-builder --user --install --force-clean build packaging/flatpak/io.github.thuutien.ZPLinux.yml
 # or build a single-file bundle with packaging/build-flatpak.sh
-app-id: org.labelix.Labelix
+app-id: io.github.thuutien.ZPLinux
 runtime: org.gnome.Platform
 runtime-version: '50'
 sdk: org.gnome.Sdk
-command: labelix
+command: zplinux
 finish-args:
   - --share=ipc
   - --socket=fallback-x11
@@ -21,7 +21,7 @@ finish-args:
   - --filesystem=home
 
 modules:
-  # Only the lp and lpstat commands, which Labelix uses for raw CUPS queues.
+  # Only the lp and lpstat commands, which ZPLinux uses for raw CUPS queues.
   # They talk to the host's CUPS through --socket=cups.
   - name: cups-client
     buildsystem: simple
@@ -64,17 +64,17 @@ modules:
         url: https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl
         sha256: 16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f
 
-  - name: labelix
+  - name: zplinux
     buildsystem: simple
     build-commands:
       - sh install.sh --prefix /app
       # Flatpak exports desktop files, icons and MIME types named after the app id.
-      - mv /app/share/applications/labelix.desktop /app/share/applications/org.labelix.Labelix.desktop
-      - sed -i 's/^Icon=labelix$/Icon=org.labelix.Labelix/' /app/share/applications/org.labelix.Labelix.desktop
-      - mv /app/share/icons/hicolor/scalable/apps/labelix.svg /app/share/icons/hicolor/scalable/apps/org.labelix.Labelix.svg
-      - sed 's|<icon name="labelix"/>|<icon name="org.labelix.Labelix"/>|' /app/share/mime/packages/labelix.xml > /app/share/mime/packages/org.labelix.Labelix.xml
-      - rm /app/share/mime/packages/labelix.xml
-      - install -Dm644 data/org.labelix.Labelix.metainfo.xml /app/share/metainfo/org.labelix.Labelix.metainfo.xml
+      - mv /app/share/applications/zplinux.desktop /app/share/applications/io.github.thuutien.ZPLinux.desktop
+      - sed -i 's/^Icon=zplinux$/Icon=io.github.thuutien.ZPLinux/' /app/share/applications/io.github.thuutien.ZPLinux.desktop
+      - mv /app/share/icons/hicolor/scalable/apps/zplinux.svg /app/share/icons/hicolor/scalable/apps/io.github.thuutien.ZPLinux.svg
+      - sed 's|<icon name="zplinux"/>|<icon name="io.github.thuutien.ZPLinux"/>|' /app/share/mime/packages/zplinux.xml > /app/share/mime/packages/io.github.thuutien.ZPLinux.xml
+      - rm /app/share/mime/packages/zplinux.xml
+      - install -Dm644 data/io.github.thuutien.ZPLinux.metainfo.xml /app/share/metainfo/io.github.thuutien.ZPLinux.metainfo.xml
     sources:
       - type: dir
         path: ../..

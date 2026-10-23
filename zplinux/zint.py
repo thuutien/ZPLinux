@@ -17,7 +17,7 @@ from functools import lru_cache
 from typing import List, Optional, Tuple
 
 # For running a zint that is not on PATH (tests, development).
-ZINT_ENV = "LABELIX_ZINT"
+ZINT_ENV = "ZPLINUX_ZINT"
 
 
 class ZintError(Exception):
