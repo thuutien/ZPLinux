@@ -8,9 +8,9 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from labelix import templates, zpl, zpl_import  # noqa: E402
-from labelix.model import (BoxElement, Code128Element, EllipseElement, ImageElement,  # noqa: E402
-                           Label, QRElement, TextElement)
+from labelix import symbology, templates, zpl, zpl_import  # noqa: E402
+from labelix.model import (BarcodeElement, BoxElement, Code128Element,  # noqa: E402
+                           EllipseElement, ImageElement, Label, QRElement, TextElement)
 
 # Shaped like ZebraDesigner's "print to file" output: a printer set-up block, then
 # ~DG graphics, then the label with ^FT positions and ^FH\ escapes.
@@ -53,6 +53,21 @@ class RoundTripTests(unittest.TestCase):
                 self.assertEqual(zpl.label_zpl(r.label, r.values), out)
                 self.assertEqual((r.label.width_dots, r.label.height_dots),
                                  (lab.width_dots, lab.height_dots))
+
+
+class SymbologyRoundTripTests(unittest.TestCase):
+    def test_every_type_round_trips(self):
+        for sym in symbology.SYMBOLOGIES:
+            with self.subTest(type=sym.key):
+                el = BarcodeElement(x=30, y=40, symbology=sym.key, data=sym.example, height=60,
+                                    module=3, ratio=2.5, columns=2 if sym.key == "pdf417" else 0,
+                                    mode=sym.modes[0][0] if sym.modes else 0)
+                out = zpl.label_zpl(Label(width_mm=101.6, height_mm=101.6, elements=[el]))
+                r = zpl_import.parse(out)
+                self.assertEqual(len(r.label.elements), 1)
+                back = r.label.elements[0]
+                self.assertEqual((back.symbology, back.data), (sym.key, sym.example))
+                self.assertEqual(zpl.label_zpl(r.label), out)
 
 
 class BarcodeTextTests(unittest.TestCase):
@@ -152,19 +167,33 @@ class DetailTests(unittest.TestCase):
 
     def test_other_fonts_rotation_and_barcodes_are_reported(self):
         r = zpl_import.parse("^XA^FO10,10^ADR,36,20^FDhi^FS"
-                             "^FO10,100^B3N,N,50,Y,N^FDABC^FS"
+                             "^FO10,100^BTN,2,3,40,4,8^FDABC^FS"
                              "^FO10,200^GE100,50,2^FS^FO300,10^GD50,50,2^FS^XZ")
         text = " ".join(r.warnings)
-        for word in ("font D", "upright", "Code 39", "Diagonal"):
+        for word in ("font D", "upright", "TLC39", "Diagonal"):
             self.assertIn(word, text)
         self.assertEqual(kinds(r.label), [TextElement, Code128Element, EllipseElement])
-        self.assertEqual(r.label.elements[1].height, 50)
 
-    def test_2d_codes_become_qr(self):
-        r = zpl_import.parse("^XA^FO10,10^BXN,6,200^FDdata matrix^FS^XZ")
-        self.assertIsInstance(r.label.elements[0], QRElement)
-        self.assertEqual(r.label.elements[0].data, "data matrix")
-        self.assertTrue(any("Data Matrix" in w for w in r.warnings))
+    def test_barcode_types_come_in_as_themselves(self):
+        r = zpl_import.parse("^XA^BY3,2.5^FO10,100^B3N,Y,50,N,N^FDABC^FS"
+                             "^FO10,10^BXN,6,200^FDdata matrix^FS^XZ")
+        code39, dm = r.label.elements
+        self.assertEqual((code39.symbology, code39.height, code39.module, code39.ratio,
+                          code39.check, code39.show_text), ("code39", 50, 3, 2.5, True, False))
+        self.assertEqual((dm.symbology, dm.module, dm.data), ("datamatrix", 6, "data matrix"))
+        self.assertEqual(len(r.warnings), 1, r.warnings)
+
+    def test_each_barcode_keeps_its_own_bar_width(self):
+        r = zpl_import.parse("^XA^BY2^FO10,10^BCN,50,N^FDA^FS^BY4^FO10,100^BCN,50,N^FDB^FS^XZ")
+        self.assertEqual([e.module for e in r.label.elements], [2, 4])
+
+    def test_gs1_datamatrix(self):
+        # FNC1 is ~1 with ~ as the escape character; a raw ~ would start a command, so
+        # the data is written with ^FH (_7E is ~)
+        r = zpl_import.parse("^XA^FO10,10^BXN,4,200,0,0,6,~,1"
+                             "^FH_^FD_7E10109501101530003_7E110AB12^FS^XZ")
+        el = r.label.elements[0]
+        self.assertEqual((el.symbology, el.data), ("gs1-datamatrix", "(01)09501101530003(10)AB12"))
 
     def test_field_numbers_become_variables(self):
         r = zpl_import.parse("^XA^FO10,10^A0N,30,30^FN3^FDJane^FS^XZ")

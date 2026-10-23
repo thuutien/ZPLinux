@@ -15,9 +15,9 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from . import barcode
-from .model import (BoxElement, Code128Element, EllipseElement, ImageElement, Label,
-                    QRElement, TextElement, dpmm)
+from . import barcode, symbology
+from .model import (BarcodeElement, BoxElement, Code128Element, EllipseElement, ImageElement,
+                    Label, QRElement, TextElement, dpmm)
 from .zpl import QR_Y_SHIFT
 
 # Where things land relative to ^FT, measured against Labelary at 203 dpi:
@@ -44,10 +44,23 @@ BARCODE_NAMES = {
     "BM": "MSI", "BO": "Aztec", "BP": "Plessey", "BR": "GS1 DataBar", "BS": "UPC/EAN extension",
     "BT": "TLC39", "BU": "UPC-A", "BX": "Data Matrix", "BZ": "POSTAL",
 }
-# 2D codes come in as QR codes, the rest as Code 128.
-TWO_D = {"B0", "B7", "BB", "BD", "BF", "BO", "BX"}
+# ^Bx commands Labelix reads as its own barcode types (symbology keys).
+COMMAND_KEYS = {
+    "B1": "code11", "B2": "i2of5", "B3": "code39", "B4": "code49", "B5": "planet",
+    "B7": "pdf417", "B8": "ean8", "B9": "upce", "BA": "code93", "BB": "codablock",
+    "BD": "maxicode", "BE": "ean13", "BF": "micropdf417", "BI": "industrial2of5",
+    "BJ": "standard2of5", "BK": "codabar", "BL": "logmars", "BM": "msi", "BO": "aztec",
+    "B0": "aztec", "BP": "plessey", "BR": "databar", "BS": "upcean-ext", "BU": "upca",
+    "BX": "datamatrix", "BZ": "postnet",
+}
 # Which ^Bx parameter is the bar height (after orientation); most have it first.
-HEIGHT_PARAM = {"B1": 2, "B3": 2, "BK": 2}
+HEIGHT_PARAM = {"B1": 2, "B3": 2, "BK": 2, "BM": 2, "BP": 2}
+# ... and which says whether to print the text (Y/N), for the types that have one.
+TEXT_PARAM = {"B1": 3, "B2": 2, "B3": 3, "B5": 2, "B8": 2, "B9": 2, "BA": 2, "BE": 2,
+              "BI": 2, "BJ": 2, "BK": 3, "BM": 3, "BP": 3, "BS": 2, "BU": 2, "BZ": 2}
+# GS1 application identifier length by its first two digits (the rest are 4 digits).
+_AI2 = {f"{n:02d}" for n in list(range(0, 23)) + [30, 37] + list(range(90, 100))}
+_AI3 = {"23", "24", "25", "40", "41", "42"}
 
 
 @dataclass
@@ -222,6 +235,9 @@ class _Field:
     params: str = ""
     data: Optional[str] = None
     number: Optional[int] = None  # ^FN
+    module: int = 2               # ^BY in force when the barcode command was read
+    ratio: float = 3.0
+    bar_height: int = 10
 
 
 def _split_labels(text: str) -> List[str]:
@@ -282,7 +298,7 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
     copies = 1
     default_font = ("0", 0, 0)    # ^CF
     default_rotation = "N"         # ^FW
-    module, bar_height = 2, 10     # ^BY
+    module, ratio, bar_height = 2, 3.0, 10     # ^BY
     fields: List[_Field] = []
     f = _Field()
     ignored = set()
@@ -321,6 +337,10 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
             w, _r, h = _ints(params, 3)
             module = w or module
             bar_height = h or bar_height
+            try:
+                ratio = max(2.0, min(3.0, float(params.split(",")[1])))
+            except (IndexError, ValueError):
+                pass
         elif name in ("FO", "FT"):
             x, y = _ints(params, 2)
             f.x, f.y, f.typeset = (x or 0) + home_x, (y or 0) + home_y, name == "FT"
@@ -364,6 +384,7 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
             f.number = _ints(params, 1)[0]
         elif name in ("BC", "BQ", "GB", "GE", "GC", "GD") or name in BARCODE_NAMES:
             f.kind, f.params = name, params
+            f.module, f.ratio, f.bar_height = module, ratio, bar_height
         elif name == "GF":
             f.kind, f.params = "GF", params
         elif name == "XG":
@@ -392,7 +413,7 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
     label = Label(dpi=dpi, darkness=darkness, copies=copies)
     values: Dict[str, str] = {}
     for fld in fields:
-        el = _element(fld, default_font, module, bar_height, graphics, values, note)
+        el = _element(fld, default_font, graphics, values, note)
         if el is None:
             continue
         prev = label.elements[-1] if label.elements else None
@@ -426,6 +447,66 @@ def _is_barcode_text(bc, el) -> bool:
             and el.x <= bc.x)
 
 
+def gs1_parens(data: str, escape: str = "~") -> str:
+    """'~10109501101530003~110ABC' (FNC1 before each AI) -> '(01)09501101530003(10)ABC'."""
+    parts = [p for p in data.split(escape + "1") if p]
+    out = []
+    for p in parts:
+        n = 2 if p[:2] in _AI2 else 3 if p[:2] in _AI3 else 4
+        out.append(f"({p[:n]}){p[n:]}")
+    return "".join(out)
+
+
+def _barcode(f: _Field, data: str, note) -> BarcodeElement:
+    """A ^Bx command as a BarcodeElement, reading the settings Labelix uses."""
+    key, cmd = COMMAND_KEYS[f.kind], f.kind
+    p = [v.strip() for v in f.params.split(",")]
+    arg = lambda i: p[i] if i < len(p) else ""
+    num = lambda i: _ints(arg(i), 1)[0]
+    el = BarcodeElement(x=f.x, y=f.y, symbology=key, data=data, module=f.module,
+                        ratio=f.ratio, height=f.bar_height)
+    if cmd != "BD" and arg(0)[:1].upper() not in ("", "N"):
+        note("Rotated barcodes were imported upright.")
+    if cmd in HEIGHT_PARAM or cmd in TEXT_PARAM or cmd in ("B4", "B7", "BB", "BF", "BL"):
+        el.height = num(HEIGHT_PARAM.get(cmd, 1)) or f.bar_height
+    if cmd in TEXT_PARAM:
+        el.show_text = arg(TEXT_PARAM[cmd]).upper() != "N"
+    if cmd in ("B4", "BF"):                     # heights given as module multiples
+        el.height *= f.module
+    if cmd == "B4":
+        el.show_text = arg(2).upper() not in ("N",)
+    if cmd == "B3":
+        el.check = arg(1).upper() == "Y"
+    elif cmd == "B2":
+        el.check = arg(4).upper() == "Y"
+    elif cmd in ("B7", "BB"):
+        el.columns, el.rows = num(3) or 0, num(4) or 0
+        if cmd == "B7":
+            el.security = num(2) or 0
+    elif cmd in ("BO", "B0"):
+        el.module = num(1) or f.module
+    elif cmd == "BX":
+        el.module = num(1) or f.module
+        el.columns, el.rows = num(3) or 0, num(4) or 0
+        escape = arg(6)[:1] or "~"
+        if data.startswith(escape + "1"):
+            el.symbology, el.data = "gs1-datamatrix", gs1_parens(data, escape)
+    elif cmd == "BR":
+        el.mode = num(1) or 1
+        if el.mode == 6:
+            el.data = symbology.gs1_parenthesize(data)
+        el.module = num(2) or f.module
+        el.height = num(4) or el.height
+    elif cmd == "BD":
+        el.mode = num(0) or 4
+    if f.typeset:
+        el.y = max(0, f.y - (el.height if symbology.get(key).shape in ("linear", "postal")
+                             else 0))
+        if symbology.get(key).shape not in ("linear", "postal"):
+            note("2D codes placed by their bottom edge (^FT) may sit a little lower.")
+    return el
+
+
 def _bottom(el) -> int:
     return el.bounds()[1] + el.bounds()[3]
 
@@ -434,7 +515,8 @@ def _right(el) -> int:
     return el.bounds()[0] + el.bounds()[2]
 
 
-def _element(f: _Field, default_font, module, bar_height, graphics, values, note):
+def _element(f: _Field, default_font, graphics, values, note):
+    module, bar_height = f.module, f.bar_height
     data = f.data or ""
     if f.hex_indicator:
         data = _unhex(data, f.hex_indicator)
@@ -474,6 +556,12 @@ def _element(f: _Field, default_font, module, bar_height, graphics, values, note
             note("Text above Code 128 barcodes was moved below them.")
         if rot != "N":
             note("Rotated barcodes were imported upright.")
+        if len(p) > 5 and p[5].strip().upper() == "D":
+            el = BarcodeElement(x=f.x, y=f.y, symbology="gs1-128", data=data, height=h,
+                                module=module, show_text=line)
+            if f.typeset:
+                el.y = max(0, f.y - h)
+            return el
         el = Code128Element(x=f.x, y=f.y, data=_code128_data(data), height=h,
                             module=module, show_text=line)
         if line and f.height:
@@ -564,17 +652,12 @@ def _element(f: _Field, default_font, module, bar_height, graphics, values, note
             el.y = max(0, f.y - el.h)
         return el
 
-    if f.kind in TWO_D:
-        note(f"{BARCODE_NAMES[f.kind]} codes became QR codes; Labelix makes Code 128 "
-             "and QR codes only.")
-        el = QRElement(x=f.x, y=f.y, data=data, magnification=max(1, min(10, module * 2)))
-        if f.typeset:
-            el.y = max(0, f.y - 25 * el.magnification)
-        return el
+    if f.kind in COMMAND_KEYS:
+        return _barcode(f, data, note)
 
     if f.kind in BARCODE_NAMES:
-        note(f"{BARCODE_NAMES[f.kind]} barcodes became Code 128; Labelix makes Code 128 "
-             "and QR codes only.")
+        note(f"{BARCODE_NAMES[f.kind]} barcodes became Code 128; Labelix doesn't make "
+             "them.")
         i = HEIGHT_PARAM.get(f.kind, 1)
         h = _ints(",".join(f.params.split(",")[i:i + 1]), 1)[0] or bar_height
         el = Code128Element(x=f.x, y=f.y, data=data, height=h, module=module)

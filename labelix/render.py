@@ -13,9 +13,9 @@ gi.require_version("PangoCairo", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import GdkPixbuf, Pango, PangoCairo  # noqa: E402
 
-from . import barcode  # noqa: E402
-from .model import (BoxElement, Code128Element, EllipseElement, ImageElement, Label,  # noqa: E402
-                    QRElement, TextElement, interpretation_height)
+from . import barcode, symbology, zint  # noqa: E402
+from .model import (BarcodeElement, BoxElement, Code128Element, EllipseElement,  # noqa: E402
+                    ImageElement, Label, QRElement, TextElement, dpmm, interpretation_height)
 
 # Closest common stand-in for Zebra font 0 (CG Triumvirate Bold Condensed).
 FONT_FAMILY = "Liberation Sans Narrow, Nimbus Sans Narrow, Ubuntu Condensed, DejaVu Sans Condensed, Sans"
@@ -117,6 +117,147 @@ def draw_code128(cr, el: Code128Element) -> None:
                      el.y + el.height + el.text_gap() + th * 0.15)
         cr.scale(sy, sy)
         PangoCairo.show_layout(cr, layout)
+    cr.restore()
+
+
+def _barcode_text(cr, el, text: str, left: float, width: float, top: float) -> float:
+    """The printer's small interpretation line, centered under the bars; returns its height."""
+    th = interpretation_height(el.module)
+    layout = _font_layout(cr, text, th, bold=False)
+    _, logical = layout.get_pixel_extents()
+    sy = th * 0.8 / max(1, logical.height)
+    cr.save()
+    cr.translate(left + (width - logical.width * sy) / 2, top + th * 0.15)
+    cr.scale(sy, sy)
+    PangoCairo.show_layout(cr, layout)
+    cr.restore()
+    return th
+
+
+def _placeholder(cr, el, message: str) -> None:
+    """A hatched box where zint could not draw the barcode."""
+    w, h = 220, max(40, el.height if el.height < 400 else 80)
+    el.measured_w, el.measured_h = w, h
+    cr.rectangle(el.x, el.y, w, h)
+    cr.set_line_width(2)
+    cr.stroke()
+    cr.move_to(el.x, el.y)
+    cr.line_to(el.x + w, el.y + h)
+    cr.stroke()
+    sym = symbology.get(el.symbology)
+    layout = _font_layout(cr, f"{sym.name if sym else el.symbology}\n{message}", 14, bold=False)
+    layout.set_width(int((w - 8) * Pango.SCALE))
+    layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+    cr.move_to(el.x + 4, el.y + 4)
+    PangoCairo.show_layout(cr, layout)
+
+
+def _x_map(sym: zint.Symbol, spec, el) -> Dict[float, float]:
+    """Module positions -> dots. Two-width codes use the ^BY ratio for wide bars and
+    spaces (rounded down, as the printer does); postal codes have wider gaps."""
+    edges = sorted({x for x, _y, w, _h in sym.rects} | {x + w for x, _y, w, _h in sym.rects}
+                   | {0.0, sym.width})
+    m = el.module
+    if spec.two_width:
+        wide = int(el.ratio * m)
+        unit = lambda run: m if run <= 1 else wide
+    elif spec.shape == "postal":
+        bars = {(x, x + w) for x, _y, w, _h in sym.rects}
+        gap = int(m * 1.5)
+        # measured: when 1.5 x module isn't whole, the printer's first gap is a dot narrower
+        first = gap - (1 if m % 2 else 0)
+        out, pos = {}, 0.0
+        for a, b in zip(edges, edges[1:]):
+            out[a] = pos
+            pos += m if (a, b) in bars else (first if a == edges[1] else gap) * (b - a)
+        out[edges[-1]] = pos
+        return out
+    else:
+        unit = lambda run: run * m
+    out, pos = {}, 0.0
+    for a, b in zip(edges, edges[1:]):
+        out[a] = pos
+        pos += unit(b - a)
+    out[edges[-1]] = pos
+    return out
+
+
+def draw_barcode(cr, el, dots_per_mm: int = 8) -> None:
+    spec = symbology.get(el.symbology)
+    cr.save()
+    cr.set_source_rgb(0, 0, 0)
+    if spec is None:
+        _placeholder(cr, el, "Unknown barcode type")
+        cr.restore()
+        return
+    try:
+        sym = zint.encode(spec.zint_type_for(el), spec.zint_data(el.data, el),
+                          tuple(spec.zint_options(el)))
+    except zint.ZintError as e:
+        _placeholder(cr, el, str(e))
+        cr.restore()
+        return
+    m = el.module
+    if spec.shape == "maxicode":
+        # MaxiCode has a fixed size whatever the module setting: the printer's ink
+        # covers 25 x 24.125 mm (measured at 203 dpi); fit zint's hexagons to that.
+        pts = [p for hexagon in sym.hexagons for p in hexagon]
+        x0, y0 = min(p[0] for p in pts), min(p[1] for p in pts)
+        sx = dots_per_mm * 25.0 / (max(p[0] for p in pts) - x0)
+        sy = dots_per_mm * 24.125 / (max(p[1] for p in pts) - y0)
+        tx = lambda px: el.x + (px - x0) * sx
+        ty = lambda py: el.y + (py - y0) * sy
+        for hexagon in sym.hexagons:
+            cr.move_to(tx(hexagon[0][0]), ty(hexagon[0][1]))
+            for px, py in hexagon[1:]:
+                cr.line_to(tx(px), ty(py))
+            cr.close_path()
+        cr.fill()
+        for cx, cy, r, stroke in sym.circles:
+            cr.new_sub_path()
+            cr.arc(tx(cx), ty(cy), r * sx, 0, 6.2832)
+        if sym.circles:
+            cr.set_line_width(sym.circles[0][3] * sx)
+            cr.stroke()
+        el.measured_w, el.measured_h = round(25.0 * dots_per_mm), round(24.125 * dots_per_mm)
+        cr.restore()
+        return
+
+    if spec.shape in ("matrix", "scaled"):
+        xs = lambda x: x * m
+        ys = lambda y: y * m
+        total_h = sym.height * m
+    elif spec.shape == "stacked":
+        heights = [h for _x, _y, _w, h in sym.rects]
+        row = max(set(heights), key=heights.count)      # the usual row height
+        xs = lambda x: x * m
+        ys = lambda y: y * el.height / row
+        total_h = sym.height * el.height / row
+    else:   # linear and postal: the height setting is the bar height
+        xm = _x_map(sym, spec, el)
+        xs = lambda x: xm[x]
+        base = min(h for _x, _y, _w, h in sym.rects)    # EAN/UPC guard bars are longer
+        total_h = el.height
+    for x, y, w, h in sym.rects:
+        x0, x1 = xs(x), xs(x + w)
+        if spec.shape == "linear":
+            # bars full height; EAN/UPC guard bars reach lower by their extra modules
+            y0, y1 = 0, el.height + max(0, h - base) * m
+        elif spec.shape == "postal":
+            # Zebra's short postal bars are 2/5 of the full height (zint's are half)
+            y0, y1 = (0 if h >= sym.height else el.height - round(el.height * 0.4)), el.height
+        else:
+            y0, y1 = ys(y), ys(y + h)
+        cr.rectangle(el.x + x0, el.y + y0, x1 - x0, y1 - y0)
+    cr.fill()
+    width = xs(sym.width) if spec.shape not in ("matrix", "scaled", "stacked") else sym.width * m
+    if spec.shape in ("linear", "postal") and (spec.always_text or
+                                                (el.show_text and "show_text" in spec.options)):
+        # below the EAN/UPC guard bars, which reach lower than the others
+        top = el.height + (max(h for *_r, h in sym.rects) - base) * m + max(2, m)
+        total_h = top + _barcode_text(cr, el, symbology.display_text(el), el.x, width,
+                                      el.y + top)
+    el.measured_w, el.measured_h = round(width), round(total_h)
     cr.restore()
 
 
@@ -266,7 +407,10 @@ def draw_label(cr, label: Label) -> None:
     cr.fill_preserve()
     cr.clip()
     for el in label.elements:
-        DRAWERS[type(el)](cr, el)
+        if isinstance(el, BarcodeElement):
+            draw_barcode(cr, el, dpmm(label.dpi))
+        else:
+            DRAWERS[type(el)](cr, el)
     cr.restore()
 
 

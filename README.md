@@ -22,9 +22,16 @@ Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
   address, asset tag, blank sizes) and your recent labels
 - **Tabs**: open and edit several labels at once, each with its own undo
   history and zoom (Ctrl+T new, Ctrl+W close, Ctrl+PageUp/PageDown to switch)
-- **Canvas**: text, Code 128 barcodes, QR codes, boxes/lines, ellipses and
-  images (converted to 1-bit for thermal printing). Drag to move, drag the
-  round handle to resize, double-click to edit content, right-click for more
+- **Canvas**: text, barcodes, QR codes, boxes/lines, ellipses and images
+  (converted to 1-bit for thermal printing). Drag to move, drag the round
+  handle to resize, double-click to edit content, right-click for more
+- **29 barcode types**, picked from the **Type** list of a barcode:
+  - 1D: Code 128, GS1-128, Code 39, Code 93, EAN-13, EAN-8, UPC-A, UPC-E,
+    UPC/EAN extension, GS1 DataBar, Interleaved 2 of 5
+  - 2D: QR code, Data Matrix, GS1 DataMatrix, PDF417, MicroPDF417, Aztec,
+    MaxiCode, Codablock F
+  - Postal and legacy: Codabar, Code 11, Code 49, Industrial 2 of 5,
+    Standard 2 of 5, LOGMARS, MSI, Plessey, Planet, POSTNET
 - **Smart guides**: elements snap to the label's edges and centre and to each
   other (hold Alt to place freely); optional 5 mm grid
 - **Layers list** to pick overlapping elements, plus align and arrange buttons
@@ -107,7 +114,9 @@ The PKGBUILD downloads `labelix-<version>.tar.gz` from the GitHub release
 ## Run from source
 
 Needs Python 3, PyGObject and GTK 3 (preinstalled on most desktops).
-`python3-qrcode` is optional and only used to draw QR codes in the preview.
+Optional, for the preview only: `python3-qrcode` draws QR codes and `zint`
+draws the barcode types other than Code 128 and QR. Labels print the same
+without them.
 
 ```bash
 python3 labelix.py
@@ -119,9 +128,9 @@ Open the example: `python3 labelix.py examples/product.labelix`
 
 | Distribution | Command |
 | --- | --- |
-| Debian / Ubuntu / Mint | `sudo apt install python3-gi gir1.2-gtk-3.0 python3-qrcode` |
-| Fedora | `sudo dnf install python3-gobject gtk3 python3-qrcode` |
-| Arch / Manjaro | `sudo pacman -S python-gobject gtk3 python-qrcode` |
+| Debian / Ubuntu / Mint | `sudo apt install python3-gi gir1.2-gtk-3.0 python3-qrcode zint` |
+| Fedora | `sudo dnf install python3-gobject gtk3 python3-qrcode zint` |
+| Arch / Manjaro | `sudo pacman -S python-gobject gtk3 python-qrcode zint` |
 
 ## Testing without a printer
 
@@ -166,13 +175,13 @@ that ZebraDesigner sends to the printer:
 2. In Labelix, **Open** the `.prn` file (or drop it onto the window). It opens
    in a new tab as an unsaved label; save it as a `.labelix` file.
 
-Text, Code 128 and QR codes, boxes, lines, ellipses and graphics come back as
-editable elements. Some things change, and Labelix lists them after the import
+Text, barcodes of every type in the list above, boxes, lines, ellipses and
+graphics come back as editable elements. Some things change, and Labelix lists them after the import
 (the **Details** button):
 
 - Printer fonts other than font 0 and TrueType fonts become font 0 at the same size.
 - Rotated text and barcodes come in upright.
-- Other 1D barcodes become Code 128; Data Matrix, PDF417 and Aztec become QR codes.
+- TLC39 barcodes, which Labelix doesn't make, become Code 128.
 - Variables come in as the sample values ZebraDesigner printed; numbered
   fields (`^FN`) become variables named `field1`, `field2` ...
 - ZPL doesn't say the printer's resolution, so Labelix assumes 203 dpi (as on
@@ -188,6 +197,14 @@ place of Zebra font 0 (CG Triumvirate Bold Condensed). The output has been
 checked against Labelary's renderer; text widths can still differ by a few
 percent, so leave some room at the label edges.
 
+The other barcode types are drawn with [zint](https://zint.org.uk/), scaled to
+the printer's dots: wide bars follow the ^BY ratio, and the sizes printers
+choose on their own (PDF417 columns, MicroPDF417 and Codablock layouts) are
+written into the ZPL so the label matches the preview. Checked against
+Labelary for every type it draws, the bars match pixel for pixel except
+Plessey's stop bar (2 dots) and MaxiCode's hexagon outlines. Labelary does not
+draw Codablock, Code 49 or MicroPDF417; those follow Zebra's ZPL manual.
+
 ## Tests
 
 ```bash
@@ -201,6 +218,8 @@ labelix/model.py     label and element data, units, JSON, {variables}
 labelix/zpl.py       ZPL generation
 labelix/render.py    Cairo preview rendering
 labelix/barcode.py   Code 128 / QR encoders for the preview
+labelix/symbology.py the other barcode types: ZPL commands and zint settings
+labelix/zint.py      runs zint for the preview of those types
 labelix/printing.py  network / USB / CUPS / file output
 labelix/templates.py templates on the start screen
 labelix/updater.py   GitHub release check and self-update
