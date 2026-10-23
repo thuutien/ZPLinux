@@ -70,6 +70,24 @@ class SymbologyRoundTripTests(unittest.TestCase):
                 self.assertEqual(zpl.label_zpl(r.label), out)
 
 
+class RotationRoundTripTests(unittest.TestCase):
+    def test_rotated_objects_round_trip(self):
+        for deg in (90, 180, 270):
+            els = [TextElement(x=40, y=40, text="Hello", height=40, rotation=deg),
+                   TextElement(x=300, y=40, text="one\ntwo", height=30, block_width=160,
+                               max_lines=2, align="C", rotation=deg),
+                   Code128Element(x=40, y=300, data="12345678", height=60, rotation=deg),
+                   BarcodeElement(x=40, y=560, symbology="code39", data="AB12", height=60,
+                                  rotation=deg),
+                   BarcodeElement(x=330, y=560, symbology="datamatrix", data="DM", module=4,
+                                  rotation=deg)]
+            out = zpl.label_zpl(Label(width_mm=101.6, height_mm=101.6, elements=els))
+            with self.subTest(rotation=deg):
+                r = zpl_import.parse(out)
+                self.assertEqual([e.rotation for e in r.label.elements], [deg] * 5)
+                self.assertEqual(zpl.label_zpl(r.label), out)
+
+
 class BarcodeTextTests(unittest.TestCase):
     def test_own_text_size_round_trips_as_one_element(self):
         lab = Label(width_mm=50.8, height_mm=25.4, elements=[
@@ -170,9 +188,10 @@ class DetailTests(unittest.TestCase):
                              "^FO10,100^BTN,2,3,40,4,8^FDABC^FS"
                              "^FO10,200^GE100,50,2^FS^FO300,10^GD50,50,2^FS^XZ")
         text = " ".join(r.warnings)
-        for word in ("font D", "upright", "TLC39", "Diagonal"):
+        for word in ("font D", "TLC39", "Diagonal"):
             self.assertIn(word, text)
         self.assertEqual(kinds(r.label), [TextElement, Code128Element, EllipseElement])
+        self.assertEqual(r.label.elements[0].rotation, 90)          # ^ADR
 
     def test_barcode_types_come_in_as_themselves(self):
         r = zpl_import.parse("^XA^BY3,2.5^FO10,100^B3N,Y,50,N,N^FDABC^FS"

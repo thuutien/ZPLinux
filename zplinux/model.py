@@ -44,17 +44,49 @@ def interpretation_height(module: int) -> int:
     return 10 + 8 * module
 
 
+def rotate_rect(rect, w: float, h: float, r: int) -> tuple:
+    """Where rect (x, y, w, h) inside a w x h area ends up when the area is turned r
+    degrees clockwise (r = 0, 90, 180, 270) about its top-left, in the turned area."""
+    x, y, rw, rh = rect
+    r %= 360
+    if r == 90:
+        return (h - y - rh, x, rh, rw)
+    if r == 180:
+        return (w - x - rw, h - y - rh, rw, rh)
+    if r == 270:
+        return (y, w - x - rw, rh, rw)
+    return (x, y, rw, rh)
+
+
 @dataclass
 class Element:
     kind = "element"
-    x: int = 20
+    x: int = 20               # top-left of the (rotated) element
     y: int = 20
+    rotation: int = 0         # clockwise: 0, 90, 180 or 270
 
     def bounds(self) -> tuple:
-        """(x, y, w, h) in dots, used for selection and hit-testing."""
-        return (self.x, self.y, 10, 10)
+        """(x, y, w, h) in dots, used for selection and hit-testing: the rotated box."""
+        x, y, w, h = self._box()
+        return (x, y, h, w) if self.rotation % 180 == 90 else (x, y, w, h)
+
+    def size(self) -> tuple:
+        """(w, h) before rotation."""
+        return self._box()[2:]
 
     def resize(self, w: int, h: int) -> None:
+        """Resize to a w x h box on the label (after rotation)."""
+        if self.rotation % 180 == 90:
+            w, h = h, w
+        self._resize(w, h)
+
+    def can_rotate(self) -> bool:
+        return True
+
+    def _box(self) -> tuple:
+        return (self.x, self.y, 10, 10)
+
+    def _resize(self, w: int, h: int) -> None:
         pass
 
     def to_dict(self) -> dict:
@@ -81,12 +113,12 @@ class TextElement(Element):
     measured_w: int = field(default=0, compare=False)
     measured_h: int = field(default=0, compare=False)
 
-    def bounds(self):
+    def _box(self):
         w = self.block_width or self.measured_w or max(10, len(self.text) * self.height // 2)
         h = self.measured_h or self.height * max(1, self.max_lines if self.block_width else 1)
         return (self.x, self.y, w, h)
 
-    def resize(self, w, h):
+    def _resize(self, w, h):
         if self.block_width:
             self.block_width = max(10, w)
         else:
@@ -106,7 +138,7 @@ class Code128Element(Element):
     text_size: int = 0        # 0: the printer's own text; else a font 0 line of this height
     measured_w: int = field(default=0, compare=False)
 
-    def bounds(self):
+    def _box(self):
         w = self.measured_w or 200
         return (self.x, self.y, w, self.height + self._text_space())
 
@@ -119,7 +151,7 @@ class Code128Element(Element):
             return 0
         return (self.text_size or interpretation_height(self.module)) + self.text_gap()
 
-    def resize(self, w, h):
+    def _resize(self, w, h):
         self.height = max(10, h - self._text_space())
 
     def text_fields(self):
@@ -134,13 +166,16 @@ class QRElement(Element):
     error_correction: str = "Q"  # H, Q, M, L
     measured_w: int = field(default=0, compare=False)
 
-    def bounds(self):
+    def _box(self):
         s = self.measured_w or 25 * self.magnification
         return (self.x, self.y, s, s)
 
-    def resize(self, w, h):
+    def _resize(self, w, h):
         modules = max(21, (self.measured_w or 25 * self.magnification) // self.magnification)
         self.magnification = max(1, min(10, round(max(w, h) / modules)))
+
+    def can_rotate(self):
+        return False          # printers draw QR codes upright; they scan from any side
 
     def text_fields(self):
         return ["data"]
@@ -165,14 +200,17 @@ class BarcodeElement(Element):
     measured_w: int = field(default=0, compare=False)
     measured_h: int = field(default=0, compare=False)
 
-    def bounds(self):
+    def _box(self):
         return (self.x, self.y, self.measured_w or 200, self.measured_h or self.height)
 
-    def resize(self, w, h):
+    def _resize(self, w, h):
         self.height = max(10, h - (self.measured_h - self.height if self.measured_h else 0))
 
     def text_fields(self):
         return ["data"]
+
+    def can_rotate(self):
+        return self.symbology != "maxicode"   # MaxiCode has no orientation in ZPL
 
 
 @dataclass
@@ -184,10 +222,10 @@ class BoxElement(Element):
     rounding: int = 0         # 0-8
     filled: bool = False
 
-    def bounds(self):
+    def _box(self):
         return (self.x, self.y, self.w, self.h)
 
-    def resize(self, w, h):
+    def _resize(self, w, h):
         self.w = max(1, w)
         self.h = max(1, h)
 
@@ -200,10 +238,10 @@ class EllipseElement(Element):
     thickness: int = 3
     filled: bool = False
 
-    def bounds(self):
+    def _box(self):
         return (self.x, self.y, self.w, self.h)
 
-    def resize(self, w, h):
+    def _resize(self, w, h):
         self.w = max(3, w)
         self.h = max(3, h)
 
@@ -217,10 +255,10 @@ class ImageElement(Element):
     threshold: int = 128      # pixels darker than this print black
     keep_aspect: bool = True
 
-    def bounds(self):
+    def _box(self):
         return (self.x, self.y, self.w, self.h)
 
-    def resize(self, w, h):
+    def _resize(self, w, h):
         if self.keep_aspect and self.w and self.h:
             ratio = self.h / self.w
             self.w = max(4, w)
@@ -231,6 +269,18 @@ class ImageElement(Element):
 
     def image_bytes(self) -> bytes:
         return base64.b64decode(self.png_b64) if self.png_b64 else b""
+
+
+def turn(el: Element, r: int, force: bool = False) -> None:
+    """Turn an element r degrees clockwise in place (its box stays at x, y). Boxes and
+    ellipses swap width and height; QR codes and MaxiCode turn only with force (when the
+    whole design turns, as they still print upright)."""
+    r %= 360
+    if isinstance(el, (BoxElement, EllipseElement)):
+        if r % 180:
+            el.w, el.h = el.h, el.w
+    elif el.can_rotate() or force:
+        el.rotation = (el.rotation + r) % 360
 
 
 def describe(el: Element) -> str:
@@ -267,6 +317,9 @@ class Label:
     darkness: int = 0         # -30..30 relative (^MD); 0 = printer default
     copies: int = 1
     elements: List[Element] = field(default_factory=list)
+    # How the design is turned on screen compared with the printed label, clockwise.
+    # width_mm and height_mm are the design's (swapped from the printed label at 90/270).
+    orientation: int = 0
 
     @property
     def width_dots(self) -> int:
@@ -275,6 +328,19 @@ class Label:
     @property
     def height_dots(self) -> int:
         return round(self.height_mm * dpmm(self.dpi))
+
+    def turn_design(self, degrees: int) -> None:
+        """Set the on-screen orientation: the paper and every object turn together, so
+        what prints doesn't change. Needs the elements' measured sizes."""
+        delta = (degrees - self.orientation) % 360
+        W, H = self.width_dots, self.height_dots
+        for el in self.elements:
+            nx, ny, _w, _h = rotate_rect(el.bounds(), W, H, delta)
+            turn(el, delta, force=True)
+            el.x, el.y = round(nx), round(ny)
+        if delta % 180:
+            self.width_mm, self.height_mm = self.height_mm, self.width_mm
+        self.orientation = degrees % 360
 
     def variables(self) -> List[str]:
         """Variable names used anywhere in the label, in order of first use."""
@@ -306,6 +372,7 @@ class Label:
             "dpi": self.dpi,
             "darkness": self.darkness,
             "copies": self.copies,
+            "orientation": self.orientation,
             "elements": [e.to_dict() for e in self.elements],
         }
         for e in d["elements"]:
@@ -324,5 +391,6 @@ class Label:
             dpi=int(d.get("dpi", 203)),
             darkness=int(d.get("darkness", 0)),
             copies=int(d.get("copies", 1)),
+            orientation=int(d.get("orientation", 0)) % 360,
             elements=[element_from_dict(e) for e in d.get("elements", [])],
         )
