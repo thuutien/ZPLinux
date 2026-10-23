@@ -12,8 +12,7 @@ optdepends=('python-qrcode: draw QR codes in the preview'
             'cups: print through a raw CUPS queue'
             'polkit: install updates from inside the app')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/thuutien/labelix/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-# Replace with the checksum printed by packaging/build-tarball.sh for the released file.
-sha256sums=('SKIP')
+sha256sums=('c35337130170072e47ea4a4edbf4ac1f9d3514c18d9f48505bd09cc8b2b8c79d')
 
 package() {
   cd "$pkgname-$pkgver"
