@@ -50,6 +50,11 @@
     <mediatype>application/x-labelix</mediatype>
   </provides>
   <releases>
+    <release version="0.3.1" date="2026-10-23">
+      <description>
+        <p>Barcodes can set the size of the text printed under them.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-10-23">
       <description>
         <ul>
