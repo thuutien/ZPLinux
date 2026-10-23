@@ -70,7 +70,7 @@ class ZplTests(unittest.TestCase):
 
     def test_code128_gt_escaped(self):
         out = zpl.label_zpl(Label(elements=[Code128Element(data="A>B")]))
-        self.assertIn("^FDA>0B^FS", out)
+        self.assertIn("^FD>:A>0B^FS", out)
 
     def test_qr_shift(self):
         out = zpl.label_zpl(Label(elements=[QRElement(x=10, y=50, data="x", error_correction="H")]))
@@ -94,15 +94,39 @@ class ZplTests(unittest.TestCase):
 
 class BarcodeTests(unittest.TestCase):
     def test_code128_width(self):
-        widths = barcode.code128_b("ABC-12345")
-        self.assertEqual(sum(widths), barcode.code128_modules("ABC-12345"))
-        self.assertIsNone(barcode.code128_b("é"))
+        widths = barcode.code128("PJJ123C")       # no digit run long enough for subset C
+        self.assertEqual(sum(widths), barcode.code128_modules("PJJ123C"))
+        self.assertIsNone(barcode.code128("é"))
 
     def test_code128_checksum(self):
         # Start B 104 + 1*48 + 2*42 + 3*42 + 4*17 + 5*18 + 6*19 + 7*35 = 879; 879 % 103 = 55
-        widths = barcode.code128_b("PJJ123C")
+        widths = barcode.code128("PJJ123C")
         check = widths[-13:-7]
         self.assertEqual("".join(map(str, check)), barcode._C128[55])
+
+    def test_code128_subset_c_like_zebradesigner(self):
+        # ZebraDesigner writes 12669 as >;1266>69: start C for 12 66, then B for the odd 9.
+        self.assertEqual(barcode.code128_zpl_data("12669"), ">;1266>69")
+        # Start C 105 + 1*12 + 2*66 + 3*100 (code B) + 4*25 ('9') = 649; 649 % 103 = 31
+        self.assertEqual(barcode.code128_values("12669"), [105, 12, 66, 100, 25, 31, 106])
+        self.assertLess(sum(barcode.code128("12669")), barcode.code128_modules("12669"))
+
+    def test_code128_subset_rules(self):
+        cases = {
+            "1234": ">;1234",              # 4+ leading digits start in C
+            "123": ">:123",                # 3 digits are no shorter in C
+            "12": ">;12",                  # exactly two digits
+            "MUG-0001": ">:MUG->50001",    # 4 digits at the end
+            "A1234B": ">:A1234B",          # 4 in the middle save nothing
+            "A12345678B": ">:A>512345678>6B",
+            "ABC-12345": ">:ABC-1>52345",  # odd run: first digit stays in B
+            "A>B": ">:A>0B",
+        }
+        for data, expected in cases.items():
+            with self.subTest(data=data):
+                self.assertEqual(barcode.code128_zpl_data(data), expected)
+                widths = barcode.code128(data)
+                self.assertEqual(len(widths) % 6, 1)   # whole symbols plus the stop bar
 
 
 class PrintingTests(unittest.TestCase):

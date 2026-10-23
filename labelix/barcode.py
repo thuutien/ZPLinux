@@ -6,7 +6,7 @@ same module layout so the preview matches what will be printed.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # Code 128 symbol widths (bar, space, bar, space, bar, space) for values 0-106.
 _C128 = (
@@ -23,27 +23,103 @@ _C128 = (
     "114131 311141 411131 211412 211214 211232 2331112"
 ).split()
 START_B = 104
+START_C = 105
+CODE_B = 100       # switch to subset B (from C)
+CODE_C = 99        # switch to subset C (from B)
 STOP = 106
 
 
-def code128_b(data: str) -> Optional[List[int]]:
-    """Alternating bar/space widths in modules for `data` in subset B, or None
-    if a character cannot be encoded in subset B."""
-    values = [START_B]
-    for ch in data:
-        o = ord(ch)
-        if not 32 <= o <= 127:
-            return None
-        values.append(o - 32)
-    check = values[0]
-    for i, v in enumerate(values[1:], start=1):
-        check += i * v
+def _digit_run(data: str, i: int) -> int:
+    n = i
+    while n < len(data) and data[n].isdigit() and data[n].isascii():
+        n += 1
+    return n - i
+
+
+def code128_segments(data: str) -> Optional[List[Tuple[str, str]]]:
+    """Split data into subset B and C runs, [("C", "1266"), ("B", "9")], following
+    ISO/IEC 15417 Annex E as ZebraDesigner does: start in C for 4 or more leading digits,
+    switch to C for 4+ digits at the end or 6+ in the middle, and keep an odd digit in B.
+    None if a character is outside subset B."""
+    if any(not 32 <= ord(c) <= 127 for c in data):
+        return None
+    segs: List[Tuple[str, str]] = []
+
+    def add(subset, text):
+        if segs and segs[-1][0] == subset:
+            segs[-1] = (subset, segs[-1][1] + text)
+        else:
+            segs.append((subset, text))
+
+    i = 0
+    lead = _digit_run(data, 0)
+    if lead >= 4 or (lead == 2 and len(data) == 2):
+        even = lead - lead % 2
+        add("C", data[:even])
+        i = even
+    while i < len(data):
+        run = _digit_run(data, i)
+        at_end = i + run == len(data)
+        if run >= 6 or (run >= 4 and at_end):
+            if run % 2:
+                add("B", data[i])
+                i += 1
+                run -= 1
+            add("C", data[i:i + run])
+            i += run
+        else:
+            add("B", data[i])
+            i += 1
+    return segs
+
+
+def code128_values(data: str) -> Optional[List[int]]:
+    """Symbol values including start, subset switches, check digit and stop."""
+    segs = code128_segments(data)
+    if segs is None:
+        return None
+    if not segs:
+        segs = [("B", "")]
+    values = [START_C if segs[0][0] == "C" else START_B]
+    for n, (subset, text) in enumerate(segs):
+        if n:
+            values.append(CODE_C if subset == "C" else CODE_B)
+        if subset == "C":
+            values.extend(int(text[k:k + 2]) for k in range(0, len(text), 2))
+        else:
+            values.extend(ord(c) - 32 for c in text)
+    check = values[0] + sum(i * v for i, v in enumerate(values[1:], start=1))
     values.append(check % 103)
     values.append(STOP)
+    return values
+
+
+def code128(data: str) -> Optional[List[int]]:
+    """Alternating bar/space widths in modules for `data`, or None if a character
+    cannot be encoded."""
+    values = code128_values(data)
+    if values is None:
+        return None
     return [int(c) for v in values for c in _C128[v]]
 
 
+def code128_zpl_data(data: str) -> Optional[str]:
+    """^BC mode N field data with explicit subset codes (>; start C, >: start B,
+    >5 to C, >6 to B), so the printer draws exactly the bars the preview shows."""
+    segs = code128_segments(data)
+    if segs is None:
+        return None
+    out = []
+    for n, (subset, text) in enumerate(segs or [("B", "")]):
+        out.append((">;" if subset == "C" else ">:") if n == 0 else
+                   (">5" if subset == "C" else ">6"))
+        out.append(text if subset == "C" else text.replace(">", ">0"))
+    return "".join(out)
+
+
 def code128_modules(data: str) -> int:
+    """Width of the subset B encoding, for the placeholder drawn when the data
+    cannot be encoded."""
     return 11 * (len(data) + 2) + 13
 
 

@@ -74,11 +74,11 @@ def draw_text(cr, el: TextElement) -> None:
 
 
 def draw_code128(cr, el: Code128Element) -> None:
-    widths = barcode.code128_b(el.data)
+    widths = barcode.code128(el.data)
     cr.save()
     cr.set_source_rgb(0, 0, 0)
     if widths is None:
-        # Not encodable in subset B: show a hatched placeholder.
+        # Not encodable in Code 128 subsets B/C: show a hatched placeholder.
         w = barcode.code128_modules(el.data) * el.module
         el.measured_w = w
         cr.rectangle(el.x, el.y, w, el.height)

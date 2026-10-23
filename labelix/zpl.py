@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional
 
+from . import barcode
 from .model import (BoxElement, Code128Element, EllipseElement, ImageElement, Label,
                     QRElement, TextElement)
 
@@ -76,8 +77,9 @@ def element_zpl(el) -> List[str]:
         text = block_text(el.text) if el.block_width else el.text.replace("\n", " ")
         return [cmd + field_data(text)]
     if isinstance(el, Code128Element):
-        # Mode N starts in subset B; '>' is the invocation character, so a literal one is '>0'.
-        data = el.data.replace(">", ">0")
+        # Spell out the subsets so the printer matches the preview. Data that can't be
+        # encoded that way goes as it is ('>' is the invocation character, so '>0').
+        data = barcode.code128_zpl_data(el.data) or el.data.replace(">", ">0")
         line = "Y" if el.show_text else "N"
         return [f"^BY{el.module}{fo}^BCN,{el.height},{line},N,N,N" + field_data(data)]
     if isinstance(el, QRElement):
