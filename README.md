@@ -45,7 +45,7 @@ Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
 [releases page](https://github.com/thuutien/labelix/releases/latest):
 
 ```bash
-sudo apt install ./labelix_0.1.0_all.deb
+sudo apt install ./labelix_0.1.1_all.deb
 ```
 
 **Arch / Manjaro**: build from `packaging/arch/PKGBUILD` with `makepkg -si`.

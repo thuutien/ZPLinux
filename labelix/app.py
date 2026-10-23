@@ -279,6 +279,7 @@ class Window(Gtk.ApplicationWindow):
 
     def _build_header(self):
         hb = Gtk.HeaderBar(show_close_button=True, title=APP_NAME)
+        hb.get_style_context().add_class("accent-bar")
         self.set_titlebar(hb)
         self.header = hb
 
