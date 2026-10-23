@@ -393,8 +393,14 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
     values: Dict[str, str] = {}
     for fld in fields:
         el = _element(fld, default_font, module, bar_height, graphics, values, note)
-        if el is not None:
-            label.elements.append(el)
+        if el is None:
+            continue
+        prev = label.elements[-1] if label.elements else None
+        if _is_barcode_text(prev, el):
+            # Labelix writes a barcode with its own text size as the barcode plus this line.
+            prev.show_text, prev.text_size = True, el.height
+            continue
+        label.elements.append(el)
 
     if not label.elements:
         raise ZplImportError("The label has nothing Labelix can show (no text, codes, "
@@ -408,6 +414,16 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
         warnings.append("Ignored: " + ", ".join(sorted(ignored)))
     warnings.insert(0, f"Assumed {dpi} dpi (change it on the Label tab if your printer differs).")
     return ImportResult(label, values, warnings)
+
+
+def _is_barcode_text(bc, el) -> bool:
+    """A centered one-line font 0 text right under a barcode that repeats its data."""
+    return (isinstance(bc, Code128Element) and not bc.show_text
+            and isinstance(el, TextElement) and el.text == bc.data
+            and el.block_width and el.max_lines == 1 and el.align == "C"
+            and not el.width and not el.reverse
+            and el.y == bc.y + bc.height + bc.text_gap()
+            and el.x <= bc.x)
 
 
 def _bottom(el) -> int:
@@ -460,6 +476,10 @@ def _element(f: _Field, default_font, module, bar_height, graphics, values, note
             note("Rotated barcodes were imported upright.")
         el = Code128Element(x=f.x, y=f.y, data=_code128_data(data), height=h,
                             module=module, show_text=line)
+        if line and f.height:
+            # ^A before ^BC sets the font of the printer's own barcode text.
+            el.text_size = f.height
+            note("Barcode text with its own font size is now centered under the bars.")
         if f.typeset:
             el.y = max(0, f.y - h)
         return el
