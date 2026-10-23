@@ -8,6 +8,7 @@ url="https://github.com/thuutien/labelix"
 license=('GPL-3.0-only')
 depends=('python' 'python-gobject' 'python-cairo' 'gtk3' 'pango')
 optdepends=('python-qrcode: draw QR codes in the preview'
+            'zint: preview the barcode types other than Code 128 and QR'
             'ttf-liberation: closest match to the printer font in the preview'
             'cups: print through a raw CUPS queue'
             'polkit: install updates from inside the app')

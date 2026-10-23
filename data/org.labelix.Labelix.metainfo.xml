@@ -15,7 +15,9 @@
       USB printer, through a raw CUPS queue, or save the ZPL to a file.
     </p>
     <ul>
-      <li>Text, Code 128 barcodes, QR codes, boxes, lines, ellipses and images</li>
+      <li>Text, boxes, lines, ellipses and images, and 29 barcode types: Code 128, QR,
+        Code 39, EAN/UPC, GS1-128, GS1 DataBar, Data Matrix, PDF417, Aztec, MaxiCode and
+        more</li>
       <li>Templates for shipping, product, price, address and asset labels</li>
       <li>Variables filled in by hand or from a CSV file for batch printing</li>
       <li>Several labels open at once in tabs</li>
