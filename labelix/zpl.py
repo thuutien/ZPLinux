@@ -65,6 +65,21 @@ def image_to_gf(el: ImageElement) -> Optional[str]:
     return f"^GFA,{total},{total},{row_bytes},{''.join(out)}"
 
 
+def barcode_text_zpl(el: Code128Element) -> str:
+    """The line under a barcode when it has its own text size: font 0, centered under
+    the bars in a one-line ^FB (as ZebraDesigner does), widened if the text is longer
+    than the barcode so it isn't cut off."""
+    widths = barcode.code128(el.data)
+    bars = (sum(widths) if widths else barcode.code128_modules(el.data)) * el.module
+    s = el.text_size
+    # Font 0 digits and capitals are a little over half as wide as they are tall.
+    block = max(bars, int(len(el.data) * s * 0.6) + s)
+    x = max(0, el.x - (block - bars) // 2)
+    y = el.y + el.height + el.text_gap()
+    return (f"^FO{x},{y}^A0N,{s},{s}^FB{block},1,0,C,0"
+            + field_data(block_text(el.data)))
+
+
 def element_zpl(el) -> List[str]:
     fo = f"^FO{max(0, el.x)},{max(0, el.y)}"
     if isinstance(el, TextElement):
@@ -80,8 +95,12 @@ def element_zpl(el) -> List[str]:
         # Spell out the subsets so the printer matches the preview. Data that can't be
         # encoded that way goes as it is ('>' is the invocation character, so '>0').
         data = barcode.code128_zpl_data(el.data) or el.data.replace(">", ">0")
-        line = "Y" if el.show_text else "N"
-        return [f"^BY{el.module}{fo}^BCN,{el.height},{line},N,N,N" + field_data(data)]
+        own_text = el.show_text and not el.text_size
+        line = "Y" if own_text else "N"
+        out = [f"^BY{el.module}{fo}^BCN,{el.height},{line},N,N,N" + field_data(data)]
+        if el.show_text and el.text_size:
+            out.append(barcode_text_zpl(el))
+        return out
     if isinstance(el, QRElement):
         # Printers draw ^BQ about 10 dots below its field origin; compensate so the
         # code lands where the designer shows it.

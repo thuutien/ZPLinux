@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from labelix import templates, zpl, zpl_import  # noqa: E402
 from labelix.model import (BoxElement, Code128Element, EllipseElement, ImageElement,  # noqa: E402
-                           QRElement, TextElement)
+                           Label, QRElement, TextElement)
 
 # Shaped like ZebraDesigner's "print to file" output: a printer set-up block, then
 # ~DG graphics, then the label with ^FT positions and ^FH\ escapes.
@@ -53,6 +53,29 @@ class RoundTripTests(unittest.TestCase):
                 self.assertEqual(zpl.label_zpl(r.label, r.values), out)
                 self.assertEqual((r.label.width_dots, r.label.height_dots),
                                  (lab.width_dots, lab.height_dots))
+
+
+class BarcodeTextTests(unittest.TestCase):
+    def test_own_text_size_round_trips_as_one_element(self):
+        lab = Label(width_mm=50.8, height_mm=25.4, elements=[
+            Code128Element(x=40, y=20, data="12669", height=60, module=2, text_size=36)])
+        out = zpl.label_zpl(lab)
+        self.assertIn("^BCN,60,N,N,N,N", out)                # the printer's own text off
+        self.assertIn("^A0N,36,36^FB", out)
+        r = zpl_import.parse(out)
+        self.assertEqual(len(r.label.elements), 1)
+        bc = r.label.elements[0]
+        self.assertEqual((bc.show_text, bc.text_size), (True, 36))
+        self.assertEqual(zpl.label_zpl(r.label), out)
+
+    def test_font_before_barcode_sets_text_size(self):
+        r = zpl_import.parse("^XA^BY2^FO50,50^A0N,30,30^BCN,60,Y,N,N^FD12345678^FS^XZ")
+        self.assertEqual(r.label.elements[0].text_size, 30)
+
+    def test_unrelated_text_under_a_barcode_stays_text(self):
+        r = zpl_import.parse("^XA^BY2^FO40,20^BCN,60,N,N,N^FDABC^FS"
+                             "^FO40,82^A0N,30,30^FB200,1,0,C,0^FDsomething else^FS^XZ")
+        self.assertEqual(len(r.label.elements), 2)
 
 
 class DesignerFileTests(unittest.TestCase):

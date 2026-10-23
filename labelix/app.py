@@ -1433,6 +1433,8 @@ class Window(Gtk.ApplicationWindow):
             form.length("Bar height", p, "height", 10, maxh)
             form.spin("Narrow bar (dots)", p, "module", 1, 10)
             form.switch("Show text below", p, "show_text")
+            form.length("Text size", p, "text_size", 0, 1000)
+            form.hint("Text size 0 lets the printer pick its usual small text.")
         elif isinstance(el, QRElement):
             form.section("QR code data")
             form.entry(None, p, "data", "Text, a link, or {variable}")

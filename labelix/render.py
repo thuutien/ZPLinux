@@ -96,7 +96,17 @@ def draw_code128(cr, el: Code128Element) -> None:
         x += mod * el.module
     cr.fill()
     el.measured_w = x - el.x
-    if el.show_text:
+    if el.show_text and el.text_size:
+        # A font 0 line, centered under the bars, as written to the ZPL.
+        s = el.text_size
+        layout = _font_layout(cr, el.data, s)
+        _, logical = layout.get_pixel_extents()
+        sy = s / max(1, logical.height)
+        tw = logical.width * WIDTH_FACTOR
+        cr.translate(el.x + (el.measured_w - tw) / 2, el.y + el.height + el.text_gap())
+        cr.scale(WIDTH_FACTOR, sy)
+        PangoCairo.show_layout(cr, layout)
+    elif el.show_text:
         th = interpretation_height(el.module)
         layout = _font_layout(cr, el.data, th, bold=False)
         _, logical = layout.get_pixel_extents()
@@ -104,7 +114,7 @@ def draw_code128(cr, el: Code128Element) -> None:
         sy = th * 0.8 / max(1, logical.height)
         tw = logical.width * sy
         cr.translate(el.x + (el.measured_w - tw) / 2,
-                     el.y + el.height + max(2, el.module) + th * 0.15)
+                     el.y + el.height + el.text_gap() + th * 0.15)
         cr.scale(sy, sy)
         PangoCairo.show_layout(cr, layout)
     cr.restore()

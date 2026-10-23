@@ -103,14 +103,21 @@ class Code128Element(Element):
     height: int = 80
     module: int = 2           # narrow bar width in dots (^BY)
     show_text: bool = True
+    text_size: int = 0        # 0: the printer's own text; else a font 0 line of this height
     measured_w: int = field(default=0, compare=False)
 
     def bounds(self):
         w = self.measured_w or 200
         return (self.x, self.y, w, self.height + self._text_space())
 
+    def text_gap(self) -> int:
+        """Space between the bars and the text below them."""
+        return max(2, self.module)
+
     def _text_space(self) -> int:
-        return interpretation_height(self.module) + max(2, self.module) if self.show_text else 0
+        if not self.show_text:
+            return 0
+        return (self.text_size or interpretation_height(self.module)) + self.text_gap()
 
     def resize(self, w, h):
         self.height = max(10, h - self._text_space())
