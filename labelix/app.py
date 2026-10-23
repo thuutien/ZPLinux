@@ -24,7 +24,8 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from . import APP_ID, APP_NAME, __version__, printing, render, updater, zpl  # noqa: E402
+from . import (APP_ID, APP_NAME, __version__, printing, render, updater, zpl,  # noqa: E402
+               zpl_import)
 from .canvas import LabelCanvas  # noqa: E402
 from .model import (DPI_CHOICES, KIND_NAMES, MM_PER_INCH, UNITS, BoxElement,  # noqa: E402
                     Code128Element, EllipseElement, Element, ImageElement, Label, QRElement,
@@ -41,6 +42,8 @@ FAKE_PRINTER_CMD = (f"flatpak run --command=labelix-fake-printer {APP_ID} --rend
                     else "labelix-fake-printer --render" if INSTALLED
                     else "python3 tools/fake_printer.py --render")
 MAX_RECENT = 8
+LABEL_EXTENSIONS = (".labelix", ".json")
+ZPL_EXTENSIONS = (".zpl", ".prn")    # ZebraDesigner "print to file" writes .prn
 PRINTER_ICONS = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
                  "cups": "printer-symbolic", "file": "text-x-generic-symbolic"}
 
@@ -163,9 +166,12 @@ class Document:
     undo_key: Optional[str] = None
     zoom: Optional[float] = None                 # None: fit to the window when shown
     panel: str = "element"
+    source: Optional[str] = None                 # the ZPL file an unsaved import came from
 
     def name(self) -> str:
-        return os.path.basename(self.path) if self.path else "Untitled label"
+        if self.path:
+            return os.path.basename(self.path)
+        return os.path.basename(self.source) if self.source else "Untitled label"
 
 
 def _doc_property(attr):
@@ -799,7 +805,7 @@ class Window(Gtk.ApplicationWindow):
     def _update_tab(self, doc: Document):
         text = ("• " if doc.dirty else "") + doc.name()
         doc.tab.title.set_text(text)
-        doc.tab.title.set_width_chars(min(len(text), 24))
+        doc.tab.title.set_width_chars(min(len(text) + 2, 26))
         doc.tab.set_tooltip_text(doc.path or doc.name())
 
     def _on_switch_tab(self, _nb, page, _n):
@@ -862,21 +868,30 @@ class Window(Gtk.ApplicationWindow):
     def open_dialog(self):
         dlg = Gtk.FileChooserNative.new("Open Label", self, Gtk.FileChooserAction.OPEN, None, None)
         dlg.set_select_multiple(True)
-        f = Gtk.FileFilter()
-        f.set_name("Labelix labels (*.labelix)")
-        f.add_pattern("*.labelix")
-        f.add_pattern("*.json")
-        dlg.add_filter(f)
+        for name, exts in (("Labels and ZPL files", LABEL_EXTENSIONS + ZPL_EXTENSIONS),
+                           ("Labelix labels (*.labelix)", LABEL_EXTENSIONS),
+                           ("ZPL from ZebraDesigner and others (*.prn, *.zpl)", ZPL_EXTENSIONS)):
+            f = Gtk.FileFilter()
+            f.set_name(name)
+            for ext in exts:
+                f.add_pattern("*" + ext)
+                f.add_pattern("*" + ext.upper())
+            dlg.add_filter(f)
         self._set_dialog_folder(dlg)
         if dlg.run() == Gtk.ResponseType.ACCEPT:
             for path in dlg.get_filenames():
                 self.open_path(path)
 
     def open_path(self, path):
-        same = next((d for d in self.docs if d.path and os.path.abspath(d.path)
-                     == os.path.abspath(path)), None)
+        target = os.path.abspath(path)
+        same = next((d for d in self.docs
+                     if (d.path or d.source) and os.path.abspath(d.path or d.source) == target),
+                    None)
         if same:
             self.switch_to(same)
+            return
+        if path.lower().endswith(ZPL_EXTENSIONS):
+            self.import_zpl(path)
             return
         try:
             with open(path) as f:
@@ -889,6 +904,38 @@ class Window(Gtk.ApplicationWindow):
         self._remember_folder(path)
         self._add_recent(path)
         self.add_document(Document(label=label, values=values, path=path))
+
+    def import_zpl(self, path):
+        """Open a ZPL file as a new, unsaved label."""
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("cp1252", errors="replace")
+            result = zpl_import.parse(text)
+        except (OSError, zpl_import.ZplImportError) as e:
+            self.error("Could not import ZPL", str(e))
+            return
+        self._remember_folder(path)
+        self.add_document(Document(label=result.label, values=result.values, source=path))
+        notes = result.warnings
+        msg = f"Imported {os.path.basename(path)} at {result.label.dpi} dpi"
+        if len(notes) > 1:
+            self.toast.show_message(
+                msg + f" · {len(notes) - 1} note{'s' if len(notes) > 2 else ''}",
+                "Details", lambda: self._show_import_notes(path, notes), seconds=10)
+        else:
+            self.notify(msg)
+
+    def _show_import_notes(self, path, notes):
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.CLOSE,
+                                text=f"Imported {os.path.basename(path)}")
+        dlg.format_secondary_text("\n\n".join("• " + n for n in notes))
+        dlg.run()
+        dlg.destroy()
 
     def _document_json(self) -> str:
         d = json.loads(self.label.to_json())
@@ -914,7 +961,7 @@ class Window(Gtk.ApplicationWindow):
         path = self.choose_save("Save Label", "label.labelix", ("Labelix labels", "*.labelix"))
         if not path:
             return False
-        if not path.endswith((".labelix", ".json")):
+        if not path.endswith(LABEL_EXTENSIONS):
             path += ".labelix"
         self.path = path
         return self.save()
@@ -935,7 +982,8 @@ class Window(Gtk.ApplicationWindow):
     def choose_save(self, title, name, filt) -> Optional[str]:
         dlg = Gtk.FileChooserNative.new(title, self, Gtk.FileChooserAction.SAVE, None, None)
         dlg.set_do_overwrite_confirmation(True)
-        base = os.path.splitext(os.path.basename(self.path))[0] if self.path else None
+        named = self.path or self.doc.source
+        base = os.path.splitext(os.path.basename(named))[0] if named else None
         dlg.set_current_name(base + os.path.splitext(name)[1] if base else name)
         f = Gtk.FileFilter()
         f.set_name(filt[0])
@@ -983,7 +1031,7 @@ class Window(Gtk.ApplicationWindow):
 
     def drop_files(self, paths, x=None, y=None):
         """Files dropped on the window or canvas: open labels, add images."""
-        labels = [p for p in paths if p.lower().endswith((".labelix", ".json"))]
+        labels = [p for p in paths if p.lower().endswith(LABEL_EXTENSIONS + ZPL_EXTENSIONS)]
         if labels:
             for p in labels:
                 self.open_path(p)
@@ -1007,7 +1055,7 @@ class Window(Gtk.ApplicationWindow):
             self.select(added)
             self.structure_changed()
         elif paths:
-            self.notify("Only images and .labelix files can be dropped here.")
+            self.notify("Only images, .labelix and ZPL (.prn, .zpl) files can be dropped here.")
 
     # ---- history ------------------------------------------------------------
 
