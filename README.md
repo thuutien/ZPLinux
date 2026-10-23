@@ -35,7 +35,9 @@ Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
   the Label tab, or **print a batch from a CSV file** whose column headers match
 - Print over the network (TCP 9100), straight to a USB printer (`/dev/usb/lp0`),
   through a raw CUPS queue, or to a `.zpl` file, with a connection test
-- Drop images or `.labelix` files onto the window
+- **Import ZPL**: open `.prn` / `.zpl` files, such as ZebraDesigner's "print to
+  file" output, as editable labels
+- Drop images, `.labelix` or ZPL files onto the window
 - Undo/redo, keyboard shortcuts (Ctrl+? lists them), light and dark themes
 - **Update check**: looks for new GitHub releases once a day (can be turned off
   in Preferences) and can download, verify and install them for you
@@ -154,10 +156,34 @@ session. Each printer connects in one of these ways:
 - **CUPS printer (raw)**: add the printer in CUPS as a *Raw* queue (no driver)
   so the ZPL reaches it unchanged; Labelix sends with `lp -o raw`.
 
+## Importing from ZebraDesigner
+
+Labelix can't read ZebraDesigner's `.nlbl` files, but it can import the ZPL
+that ZebraDesigner sends to the printer:
+
+1. In ZebraDesigner, print the label to a file instead of to the printer.
+   This saves the ZPL as a `.prn` file.
+2. In Labelix, **Open** the `.prn` file (or drop it onto the window). It opens
+   in a new tab as an unsaved label; save it as a `.labelix` file.
+
+Text, Code 128 and QR codes, boxes, lines, ellipses and graphics come back as
+editable elements. Some things change, and Labelix lists them after the import
+(the **Details** button):
+
+- Printer fonts other than font 0 and TrueType fonts become font 0 at the same size.
+- Rotated text and barcodes come in upright.
+- Other 1D barcodes become Code 128; Data Matrix, PDF417 and Aztec become QR codes.
+- Variables come in as the sample values ZebraDesigner printed; numbered
+  fields (`^FN`) become variables named `field1`, `field2` ...
+- ZPL doesn't say the printer's resolution, so Labelix assumes 203 dpi (as on
+  a GK420d) unless the label is wider than 4.1 inches. Change it on the Label tab.
+
 ## How the preview relates to the printer
 
-The canvas draws each element the way the printer will: barcodes use the same
-module layout as Zebra's Code 128 subset B, and text uses a narrow sans font in
+The canvas draws each element the way the printer will: Code 128 barcodes pack
+runs of digits in pairs (subset C, as ZebraDesigner does) and the ZPL names
+the subsets explicitly, so the bars on screen are the bars on the label. Text
+uses a narrow sans font in
 place of Zebra font 0 (CG Triumvirate Bold Condensed). The output has been
 checked against Labelary's renderer; text widths can still differ by a few
 percent, so leave some room at the label edges.
