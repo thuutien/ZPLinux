@@ -27,9 +27,10 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 from . import (APP_ID, APP_NAME, __version__, printing, render, updater, zpl,  # noqa: E402
                zpl_import)
 from .canvas import LabelCanvas  # noqa: E402
-from .model import (DPI_CHOICES, KIND_NAMES, MM_PER_INCH, UNITS, BoxElement,  # noqa: E402
-                    Code128Element, EllipseElement, Element, ImageElement, Label, QRElement,
-                    TextElement, describe, dpmm, element_from_dict, to_unit)
+from .model import (DPI_CHOICES, KIND_NAMES, MM_PER_INCH, UNITS, BarcodeElement,  # noqa: E402
+                    BoxElement, Code128Element, EllipseElement, Element, ImageElement, Label,
+                    QRElement, TextElement, describe, dpmm, element_from_dict, to_unit)
+from . import symbology, zint  # noqa: E402
 from .templates import TEMPLATES  # noqa: E402
 from .widgets import CSS, PropertyForm, Toast, dim_label, icon_button  # noqa: E402
 
@@ -66,6 +67,7 @@ KIND_ICONS = {
     "text": "labelix-text-symbolic",
     "code128": "labelix-barcode-symbolic",
     "qr": "labelix-qr-symbolic",
+    "barcode": "labelix-barcode-symbolic",
     "box": "labelix-box-symbolic",
     "ellipse": "labelix-ellipse-symbolic",
     "image": "labelix-image-symbolic",
@@ -146,6 +148,15 @@ def thumbnail(label: Label, values: dict, max_w: int, max_h: int):
     cr.scale(scale, scale)
     render.draw_label(cr, label.filled(values))
     return surf
+
+
+def barcode_type(el) -> str:
+    """The Type list's id for a barcode or QR element."""
+    if isinstance(el, Code128Element):
+        return "code128"
+    if isinstance(el, QRElement):
+        return "qr"
+    return el.symbology
 
 
 def file_paths(data) -> List[str]:
@@ -1426,7 +1437,8 @@ class Window(Gtk.ApplicationWindow):
             else:
                 form.hint("Turn on to wrap long text, use several lines, or center it.")
         elif isinstance(el, Code128Element):
-            form.section("Barcode data")
+            form.section("Barcode")
+            self._barcode_type_row(form, el)
             form.entry(None, p, "data", "e.g. ABC-123 or {sku}")
             form.hint("Code 128: letters, digits and symbols (printable ASCII).")
             form.section("Size")
@@ -1435,8 +1447,11 @@ class Window(Gtk.ApplicationWindow):
             form.switch("Show text below", p, "show_text")
             form.length("Text size", p, "text_size", 0, 1000)
             form.hint("Text size 0 lets the printer pick its usual small text.")
+        elif isinstance(el, BarcodeElement):
+            self._barcode_props(form, el, p, maxh)
         elif isinstance(el, QRElement):
-            form.section("QR code data")
+            form.section("QR code")
+            self._barcode_type_row(form, el)
             form.entry(None, p, "data", "Text, a link, or {variable}")
             form.section("Size")
             form.spin("Module size (dots)", p, "magnification", 1, 10)
@@ -1505,6 +1520,107 @@ class Window(Gtk.ApplicationWindow):
         self.props_box.show_all()
 
     # ---- label panel --------------------------------------------------------
+
+    # ---- barcode types ------------------------------------------------------
+
+    def _barcode_type_row(self, form, el):
+        """The Type list at the top of every barcode and QR code: Code 128, QR and the
+        symbology table, grouped by separators."""
+        combo = Gtk.ComboBoxText()
+        combo.set_row_separator_func(lambda model, it: model[it][1] == "-")
+        combo.append("code128", "Code 128")
+        last = "1D"
+        for sym in symbology.SYMBOLOGIES:
+            if sym.group != last:
+                combo.append("-", "-")
+                if sym.group == "2D":
+                    combo.append("qr", "QR code")
+                last = sym.group
+            combo.append(sym.key, sym.name)
+        combo.set_active_id(barcode_type(el))
+        combo.set_wrap_width(1)
+        combo.connect("changed", lambda c: c.get_active_id() not in (None, "-")
+                      and GLib.idle_add(self.change_barcode_type, el, c.get_active_id()))
+        form.widget(combo, "Type")
+
+    def change_barcode_type(self, el, key: str):
+        """Swap a barcode for another type in the same place, keeping its data unless
+        that was just the old type's example."""
+        if key == barcode_type(el) or not any(e is el for e in self.label.elements):
+            return False
+        examples = {s.example for s in symbology.SYMBOLOGIES} | {
+            Code128Element().data, QRElement().data, ""}
+        spec = symbology.get(key)
+        d = dpmm(self.label.dpi)
+        if key == "code128":
+            data = Code128Element().data
+        elif key == "qr":
+            data = QRElement().data
+        else:
+            data = spec.example
+        if el.data not in examples:
+            data = el.data
+        module = getattr(el, "module", max(1, d // 4))
+        if key == "code128":
+            new = Code128Element(data=data, height=getattr(el, "height", d * 10), module=module)
+        elif key == "qr":
+            new = QRElement(data=data, magnification=getattr(el, "magnification", max(2, d // 2)))
+        else:
+            two_d = spec.shape in ("matrix", "maxicode")
+            new = BarcodeElement(symbology=key, data=data,
+                                 module=max(2, d // 2) if two_d else module,
+                                 height=getattr(el, "height", d * 10) if not two_d else d * 10,
+                                 show_text=getattr(el, "show_text", True))
+            if spec.shape == "stacked":
+                # a row height, not a bar height: PDF417 rows are about 3 modules tall
+                new.height = new.module * (8 if key in ("codablock", "code49") else 3)
+            if spec.modes:
+                new.mode = spec.modes[0][0]
+        new.x, new.y = el.x, el.y
+        self.checkpoint()
+        i = next(i for i, e in enumerate(self.label.elements) if e is el)
+        self.label.elements[i] = new
+        self.selected = new
+        self.props_form = None
+        self.build_props()
+        self.structure_changed()
+        self.canvas.queue_draw()
+        return False
+
+    def _barcode_props(self, form, el, p, maxh):
+        spec = symbology.get(el.symbology)
+        form.section("Barcode")
+        self._barcode_type_row(form, el)
+        form.entry(None, p, "data", spec.example if spec else "")
+        if spec is None:
+            form.hint(f"Unknown barcode type '{el.symbology}'.")
+            return
+        form.hint(spec.hint)
+        if not zint.available():
+            form.hint("Install zint to see this barcode in the preview; it prints without it.")
+        opts = spec.options
+        stacked = spec.shape == "stacked"
+        form.section("Size")
+        if "height" in opts:
+            form.length("Row height" if stacked else "Bar height", p, "height", 2, maxh)
+        if spec.shape != "maxicode":
+            form.spin("Module size (dots)" if spec.shape in ("matrix", "stacked", "scaled")
+                      else "Narrow bar (dots)", p, "module", 1, 10)
+        if "ratio" in opts:
+            form.spin("Wide to narrow ratio", p, "ratio", 2.0, 3.0, step=0.1, digits=1)
+        if "columns" in opts:
+            form.spin("Columns (0 = automatic)", p, "columns", 0, 144)
+        if "rows" in opts:
+            form.spin("Rows (0 = automatic)", p, "rows", 0, 144)
+        if "security" in opts:
+            form.spin("Error correction level", p, "security", 0, 8)
+        if "mode" in opts and spec.modes:
+            form.combo("Variant" if el.symbology == "databar" else "Mode", p, "mode",
+                       list(spec.modes))
+        if "show_text" in opts:
+            form.switch("Show text below", p, "show_text")
+        if "check" in opts:
+            form.switch("Add check digit", p, "check")
 
     def refresh_label_panel(self):
         child = self.label_box.get_child()

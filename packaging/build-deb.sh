@@ -17,7 +17,7 @@ Section: graphics
 Priority: optional
 Architecture: all
 Depends: python3 (>= 3.7), python3-gi, python3-gi-cairo, python3-cairo, gir1.2-gtk-3.0, gir1.2-pango-1.0
-Recommends: python3-qrcode, fonts-liberation | fonts-liberation2, pkexec | policykit-1
+Recommends: python3-qrcode, zint, fonts-liberation | fonts-liberation2, pkexec | policykit-1
 Suggests: cups-client
 Maintainer: Labelix <labelix@localhost>
 Description: Label designer for Zebra and other ZPL thermal printers

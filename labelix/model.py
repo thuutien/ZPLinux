@@ -147,6 +147,35 @@ class QRElement(Element):
 
 
 @dataclass
+class BarcodeElement(Element):
+    """Every barcode type other than Code 128 and QR; `symbology` is a key from
+    symbology.SYMBOLOGIES and decides which of the settings below are used."""
+    kind = "barcode"
+    symbology: str = "code39"
+    data: str = "ABC-123"
+    height: int = 80          # bar height in dots (row height for stacked codes)
+    module: int = 2           # narrow bar or module size in dots (^BY)
+    ratio: float = 3.0        # wide to narrow bar ratio, 2.0-3.0 (^BY)
+    show_text: bool = True
+    check: bool = False       # add an optional check digit
+    columns: int = 0          # 2D/stacked size, 0 = automatic
+    rows: int = 0
+    security: int = 0         # PDF417 error correction level
+    mode: int = 0             # GS1 DataBar type, MaxiCode mode
+    measured_w: int = field(default=0, compare=False)
+    measured_h: int = field(default=0, compare=False)
+
+    def bounds(self):
+        return (self.x, self.y, self.measured_w or 200, self.measured_h or self.height)
+
+    def resize(self, w, h):
+        self.height = max(10, h - (self.measured_h - self.height if self.measured_h else 0))
+
+    def text_fields(self):
+        return ["data"]
+
+
+@dataclass
 class BoxElement(Element):
     kind = "box"
     w: int = 200
@@ -208,19 +237,20 @@ def describe(el: Element) -> str:
     """Short human description for the layers list."""
     if isinstance(el, TextElement):
         return el.text.replace("\n", " ").strip() or "(empty text)"
-    if isinstance(el, (Code128Element, QRElement)):
+    if isinstance(el, (Code128Element, QRElement, BarcodeElement)):
         return el.data or "(no data)"
     if isinstance(el, (BoxElement, EllipseElement, ImageElement)):
         return f"{el.w} × {el.h} dots"
     return el.kind
 
 
-KIND_NAMES = {"text": "Text", "code128": "Barcode", "qr": "QR code", "box": "Box",
-              "ellipse": "Ellipse", "image": "Image"}
+KIND_NAMES = {"text": "Text", "code128": "Barcode", "qr": "QR code", "barcode": "Barcode",
+              "box": "Box", "ellipse": "Ellipse", "image": "Image"}
 
 
 KINDS: Dict[str, type] = {c.kind: c for c in (
-    TextElement, Code128Element, QRElement, BoxElement, EllipseElement, ImageElement)}
+    TextElement, Code128Element, QRElement, BarcodeElement, BoxElement, EllipseElement,
+    ImageElement)}
 
 
 def element_from_dict(d: dict) -> Element:

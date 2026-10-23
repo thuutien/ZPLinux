@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Optional
 
 from . import barcode
-from .model import (BoxElement, Code128Element, EllipseElement, ImageElement, Label,
+from . import symbology
+from .model import (BarcodeElement, BoxElement, Code128Element, EllipseElement, ImageElement, Label,
                     QRElement, TextElement)
 
 
@@ -106,6 +107,12 @@ def element_zpl(el) -> List[str]:
         # code lands where the designer shows it.
         fo = f"^FO{max(0, el.x)},{max(0, el.y - QR_Y_SHIFT)}"
         return [f"{fo}^BQN,2,{el.magnification}" + field_data(f"{el.error_correction}A,{el.data}")]
+    if isinstance(el, BarcodeElement):
+        sym = symbology.get(el.symbology)
+        if sym is None:
+            return []
+        by = f"^BY{el.module},{el.ratio:.1f}" if sym.two_width else f"^BY{el.module}"
+        return [f"{by}{fo}{sym.zpl(el)}" + field_data(sym.zpl_data(el.data, el))]
     if isinstance(el, BoxElement):
         t = min(el.w, el.h) if el.filled else max(1, min(el.thickness, el.w, el.h))
         return [f"{fo}^GB{el.w},{el.h},{t},B,{el.rounding}^FS"]
