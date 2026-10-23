@@ -1,0 +1,298 @@
+"""The design surface: draws the label and handles selecting, moving and resizing."""
+
+from __future__ import annotations
+
+from typing import List, Optional, Tuple
+from urllib.parse import unquote, urlparse
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gtk  # noqa: E402
+
+from . import render  # noqa: E402
+from .model import Element, dpmm  # noqa: E402
+
+MARGIN = 32          # screen pixels around the label
+HANDLE = 6           # resize handle radius in screen pixels
+SNAP_PX = 6          # snapping distance in screen pixels
+GRID_MM = 5
+ACCENT = (0.21, 0.52, 0.89)
+GUIDE = (0.91, 0.2, 0.55)
+
+
+class LabelCanvas(Gtk.DrawingArea):
+    """`host` is the window; the canvas reads host.label / host.values / host.selected and
+    calls host.select(), host.checkpoint(), host.element_changed(), host.context_menu(),
+    host.activate_element(), host.drop_files() and host.pointer_moved()."""
+
+    def __init__(self, host):
+        super().__init__(can_focus=True)
+        self.host = host
+        self.zoom = 1.0
+        self.show_grid = False
+        self.snap = True
+        self.hover: Optional[Element] = None
+        self.drag = None       # dict while a move/resize is in progress
+        self.guides: List[Tuple[str, float]] = []   # ("v", x) / ("h", y) in dots
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
+                        | Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.SCROLL_MASK
+                        | Gdk.EventMask.SMOOTH_SCROLL_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_press)
+        self.connect("button-release-event", self.on_release)
+        self.connect("motion-notify-event", self.on_motion)
+        self.connect("leave-notify-event", self.on_leave)
+        self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY)
+        self.drag_dest_add_uri_targets()
+        self.connect("drag-data-received", self.on_drop)
+
+    # ---- geometry -----------------------------------------------------------
+
+    @property
+    def label(self):
+        return self.host.label
+
+    def resize_to_label(self):
+        self.set_size_request(int(self.label.width_dots * self.zoom) + 2 * MARGIN,
+                              int(self.label.height_dots * self.zoom) + 2 * MARGIN)
+        self.queue_draw()
+
+    def origin(self) -> Tuple[float, float]:
+        """Top-left of the label in widget pixels; the label is centred when it is smaller
+        than the visible area."""
+        a = self.get_allocation()
+        w = self.label.width_dots * self.zoom
+        h = self.label.height_dots * self.zoom
+        return max(MARGIN, (a.width - w) / 2), max(MARGIN, (a.height - h) / 2)
+
+    def to_dots(self, ex: float, ey: float) -> Tuple[float, float]:
+        ox, oy = self.origin()
+        return (ex - ox) / self.zoom, (ey - oy) / self.zoom
+
+    def hit(self, x: float, y: float) -> Optional[Element]:
+        pad = 4 / self.zoom
+        for el in reversed(self.label.elements):
+            bx, by, bw, bh = el.bounds()
+            if bx - pad <= x <= bx + bw + pad and by - pad <= y <= by + bh + pad:
+                return el
+        return None
+
+    def on_handle(self, ex: float, ey: float) -> bool:
+        el = self.host.selected
+        if not el:
+            return False
+        x, y, w, h = el.bounds()
+        ox, oy = self.origin()
+        hx, hy = ox + (x + w) * self.zoom + 2, oy + (y + h) * self.zoom + 2
+        return (ex - hx) ** 2 + (ey - hy) ** 2 <= (HANDLE + 4) ** 2
+
+    # ---- drawing ------------------------------------------------------------
+
+    def on_draw(self, widget, cr):
+        lab = self.label
+        ox, oy = self.origin()
+        w, h = lab.width_dots * self.zoom, lab.height_dots * self.zoom
+        cr.translate(ox, oy)
+
+        # Soft shadow under the paper
+        for i, alpha in ((6, 0.06), (3, 0.08), (1, 0.12)):
+            cr.set_source_rgba(0, 0, 0, alpha)
+            cr.rectangle(-i + 1, -i + 3, w + 2 * i - 2, h + 2 * i - 2)
+            cr.fill()
+
+        cr.save()
+        cr.scale(self.zoom, self.zoom)
+        preview = lab.filled(self.host.values)
+        render.draw_label(cr, preview)
+        # Measured sizes come from the preview; copy them back for hit-testing.
+        for src, dst in zip(preview.elements, lab.elements):
+            for attr in ("measured_w", "measured_h"):
+                if hasattr(src, attr):
+                    setattr(dst, attr, getattr(src, attr))
+        cr.restore()
+
+        if self.show_grid:
+            step = GRID_MM * dpmm(lab.dpi) * self.zoom
+            cr.set_source_rgba(*ACCENT, 0.18)
+            cr.set_line_width(1)
+            x = step
+            while x < w:
+                cr.move_to(int(x) + 0.5, 0)
+                cr.line_to(int(x) + 0.5, h)
+                x += step
+            y = step
+            while y < h:
+                cr.move_to(0, int(y) + 0.5)
+                cr.line_to(w, int(y) + 0.5)
+                y += step
+            cr.stroke()
+
+        if self.guides:
+            cr.set_source_rgb(*GUIDE)
+            cr.set_line_width(1)
+            for kind, pos in self.guides:
+                p = int(pos * self.zoom) + 0.5
+                if kind == "v":
+                    cr.move_to(p, -MARGIN / 2)
+                    cr.line_to(p, h + MARGIN / 2)
+                else:
+                    cr.move_to(-MARGIN / 2, p)
+                    cr.line_to(w + MARGIN / 2, p)
+            cr.stroke()
+
+        if self.hover is not None and self.hover is not self.host.selected \
+                and self.hover in lab.elements and not self.drag:
+            x, y, bw, bh = (v * self.zoom for v in self.hover.bounds())
+            cr.set_source_rgba(*ACCENT, 0.5)
+            cr.set_line_width(1)
+            cr.rectangle(int(x) - 1.5, int(y) - 1.5, int(bw) + 3, int(bh) + 3)
+            cr.stroke()
+
+        sel = self.host.selected
+        if sel is not None and sel in lab.elements:
+            x, y, bw, bh = (v * self.zoom for v in sel.bounds())
+            cr.set_source_rgba(*ACCENT, 1)
+            cr.set_line_width(1.5)
+            cr.rectangle(int(x) - 2, int(y) - 2, int(bw) + 4, int(bh) + 4)
+            cr.stroke()
+            import math
+            cr.arc(x + bw + 2, y + bh + 2, HANDLE, 0, 2 * math.pi)
+            cr.set_source_rgb(1, 1, 1)
+            cr.fill_preserve()
+            cr.set_source_rgb(*ACCENT)
+            cr.set_line_width(2)
+            cr.stroke()
+        return False
+
+    # ---- snapping -----------------------------------------------------------
+
+    def _targets(self, moving: Element):
+        lab = self.label
+        xs = [0, lab.width_dots / 2, lab.width_dots]
+        ys = [0, lab.height_dots / 2, lab.height_dots]
+        for el in lab.elements:
+            if el is moving:
+                continue
+            bx, by, bw, bh = el.bounds()
+            xs += [bx, bx + bw / 2, bx + bw]
+            ys += [by, by + bh / 2, by + bh]
+        return xs, ys
+
+    def _snap_axis(self, pos: float, offsets, targets, kind: str) -> float:
+        thresh = SNAP_PX / self.zoom
+        best = None
+        for off in offsets:
+            for t in targets:
+                d = t - (pos + off)
+                if abs(d) <= thresh and (best is None or abs(d) < abs(best[0])):
+                    best = (d, t)
+        if best is not None:
+            self.guides.append((kind, best[1]))
+            return pos + best[0]
+        if self.show_grid:
+            step = GRID_MM * dpmm(self.label.dpi)
+            return round(pos / step) * step
+        return pos
+
+    # ---- events -------------------------------------------------------------
+
+    def on_press(self, widget, ev):
+        self.grab_focus()
+        x, y = self.to_dots(ev.x, ev.y)
+        if ev.type == Gdk.EventType._2BUTTON_PRESS and ev.button == 1:
+            el = self.hit(x, y)
+            if el:
+                self.host.activate_element(el)
+            return True
+        if ev.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        if ev.button == 3:
+            el = self.hit(x, y)
+            if el is not self.host.selected:
+                self.host.select(el)
+            self.host.context_menu(ev, el)
+            return True
+        if ev.button != 1:
+            return False
+        if self.on_handle(ev.x, ev.y):
+            self.drag = {"mode": "resize", "x": x, "y": y, "orig": self.host.selected.bounds(),
+                         "started": False}
+            return True
+        el = self.hit(x, y)
+        if el is not self.host.selected:
+            self.host.select(el)
+        if el:
+            self.drag = {"mode": "move", "x": x, "y": y, "orig": (el.x, el.y), "started": False}
+        return True
+
+    def on_motion(self, widget, ev):
+        x, y = self.to_dots(ev.x, ev.y)
+        self.host.pointer_moved(x, y)
+        el = self.host.selected
+        if self.drag and el:
+            d = self.drag
+            dx, dy = x - d["x"], y - d["y"]
+            if not d["started"]:
+                if abs(dx) * self.zoom < 3 and abs(dy) * self.zoom < 3:
+                    return True
+                self.host.checkpoint()
+                d["started"] = True
+            free = bool(ev.state & Gdk.ModifierType.MOD1_MASK) or not self.snap
+            self.guides = []
+            lab = self.label
+            if d["mode"] == "move":
+                _bx, _by, bw, bh = el.bounds()
+                nx, ny = d["orig"][0] + dx, d["orig"][1] + dy
+                if not free:
+                    xs, ys = self._targets(el)
+                    nx = self._snap_axis(nx, (0, bw / 2, bw), xs, "v")
+                    ny = self._snap_axis(ny, (0, bh / 2, bh), ys, "h")
+                el.x = int(round(max(0, min(lab.width_dots - 1, nx))))
+                el.y = int(round(max(0, min(lab.height_dots - 1, ny))))
+            else:
+                ox, oy, ow, oh = d["orig"]
+                right, bottom = ox + ow + dx, oy + oh + dy
+                if not free:
+                    xs, ys = self._targets(el)
+                    right = self._snap_axis(right, (0,), xs, "v")
+                    bottom = self._snap_axis(bottom, (0,), ys, "h")
+                el.resize(int(round(right - ox)), int(round(bottom - oy)))
+            self.host.element_changed(el)
+            return True
+        hov = self.hit(x, y)
+        if hov is not self.hover:
+            self.hover = hov
+            self.queue_draw()
+        cursor = "se-resize" if self.on_handle(ev.x, ev.y) else ("move" if hov else None)
+        win = self.get_window()
+        if win:
+            win.set_cursor(Gdk.Cursor.new_from_name(win.get_display(), cursor) if cursor else None)
+        return True
+
+    def on_leave(self, *_):
+        if self.hover is not None:
+            self.hover = None
+            self.queue_draw()
+        self.host.pointer_moved(None, None)
+
+    def on_release(self, widget, ev):
+        was_drag = self.drag and self.drag["started"]
+        self.drag = None
+        if self.guides:
+            self.guides = []
+            self.queue_draw()
+        if was_drag:
+            self.host.drag_finished()
+        return True
+
+    def on_drop(self, widget, ctx, ex, ey, data, info, time):
+        paths = []
+        for uri in data.get_uris() or []:
+            u = urlparse(uri)
+            if u.scheme == "file":
+                paths.append(unquote(u.path))
+        x, y = self.to_dots(ex, ey)
+        if paths:
+            self.host.drop_files(paths, x, y)

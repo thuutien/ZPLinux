@@ -1,0 +1,88 @@
+{
+  "format": "labelix",
+  "version": 1,
+  "width_mm": 101.6,
+  "height_mm": 50.8,
+  "dpi": 203,
+  "darkness": 0,
+  "copies": 1,
+  "elements": [
+    {
+      "x": 10,
+      "y": 10,
+      "w": 793,
+      "h": 386,
+      "thickness": 4,
+      "rounding": 1,
+      "filled": false,
+      "kind": "box"
+    },
+    {
+      "x": 30,
+      "y": 30,
+      "text": "{name}",
+      "height": 60,
+      "width": 0,
+      "block_width": 0,
+      "max_lines": 1,
+      "align": "L",
+      "reverse": false,
+      "kind": "text"
+    },
+    {
+      "x": 30,
+      "y": 100,
+      "text": "SKU: {sku}",
+      "height": 30,
+      "width": 0,
+      "block_width": 0,
+      "max_lines": 1,
+      "align": "L",
+      "reverse": false,
+      "kind": "text"
+    },
+    {
+      "x": 30,
+      "y": 150,
+      "data": "{sku}",
+      "height": 120,
+      "module": 3,
+      "show_text": true,
+      "kind": "code128"
+    },
+    {
+      "x": 600,
+      "y": 40,
+      "data": "https://example.com/p/{sku}",
+      "magnification": 6,
+      "error_correction": "Q",
+      "kind": "qr"
+    },
+    {
+      "x": 560,
+      "y": 300,
+      "w": 220,
+      "h": 70,
+      "thickness": 3,
+      "rounding": 0,
+      "filled": true,
+      "kind": "box"
+    },
+    {
+      "x": 560,
+      "y": 315,
+      "text": "IN STOCK",
+      "height": 45,
+      "width": 0,
+      "block_width": 220,
+      "max_lines": 1,
+      "align": "C",
+      "reverse": true,
+      "kind": "text"
+    }
+  ],
+  "preview_values": {
+    "name": "Blue Mug",
+    "sku": "MUG-0001"
+  }
+}

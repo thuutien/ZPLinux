@@ -1,0 +1,168 @@
+"""Tests for the label model, ZPL output and printing. Run: python3 -m unittest discover tests"""
+
+import base64
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from labelix import barcode, printing, zpl  # noqa: E402
+from labelix.model import (BoxElement, Code128Element, ImageElement, Label, QRElement,  # noqa: E402
+                           TextElement)
+
+# 2x2 PNG: black, white / white, black
+PNG_2X2 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNg+M/wnwEABgAB/4/x/JoAAAAASUVORK5CYII=")
+
+
+class ModelTests(unittest.TestCase):
+    def test_dots(self):
+        lab = Label(width_mm=101.6, height_mm=50.8, dpi=203)
+        self.assertEqual((lab.width_dots, lab.height_dots), (813, 406))
+        lab.dpi = 300
+        self.assertEqual(lab.width_dots, 1219)
+
+    def test_variables_and_fill(self):
+        lab = Label(elements=[TextElement(text="Hi {name} {name}"), Code128Element(data="{sku}"),
+                              BoxElement()])
+        self.assertEqual(lab.variables(), ["name", "sku"])
+        filled = lab.filled({"name": "Ann"})
+        self.assertEqual(filled.elements[0].text, "Hi Ann Ann")
+        self.assertEqual(filled.elements[1].data, "{sku}")
+        self.assertEqual(lab.elements[0].text, "Hi {name} {name}")  # original untouched
+
+    def test_json_roundtrip(self):
+        lab = Label(width_mm=50.0, height_mm=30.0, dpi=300, copies=3,
+                    elements=[TextElement(text="x", reverse=True), QRElement(data="q"),
+                              ImageElement(png_b64=base64.b64encode(PNG_2X2).decode(), w=2, h=2)])
+        again = Label.from_json(lab.to_json())
+        self.assertEqual(again.to_json(), lab.to_json())
+        self.assertIsInstance(again.elements[1], QRElement)
+
+    def test_rejects_other_json(self):
+        with self.assertRaises(ValueError):
+            Label.from_json('{"hello": 1}')
+
+
+class ZplTests(unittest.TestCase):
+    def test_structure(self):
+        lab = Label(width_mm=50.8, height_mm=25.4, dpi=203, copies=2,
+                    elements=[TextElement(x=5, y=6, text="A", height=30)])
+        out = zpl.label_zpl(lab)
+        self.assertTrue(out.startswith("^XA\n^CI28\n^PW406\n^LL203\n"))
+        self.assertIn("^FO5,6^A0N,30,30^FH_^FDA^FS", out)
+        self.assertIn("^PQ2", out)
+        self.assertTrue(out.rstrip().endswith("^XZ"))
+
+    def test_newlines_need_a_text_block(self):
+        out = zpl.label_zpl(Label(elements=[TextElement(text="a\nb")]))
+        self.assertIn("^FDa b^FS", out)
+        out = zpl.label_zpl(Label(elements=[TextElement(text="a\nb", block_width=100, max_lines=2)]))
+        self.assertIn("^FDa\\&b^FS", out)
+
+    def test_escaping(self):
+        self.assertEqual(zpl.escape("a^b~c_d\\e"), "a_5Eb_7Ec_5Fd\\e")
+
+    def test_code128_gt_escaped(self):
+        out = zpl.label_zpl(Label(elements=[Code128Element(data="A>B")]))
+        self.assertIn("^FDA>0B^FS", out)
+
+    def test_qr_shift(self):
+        out = zpl.label_zpl(Label(elements=[QRElement(x=10, y=50, data="x", error_correction="H")]))
+        self.assertIn("^FO10,40^BQN,2,4^FH_^FDHA,x^FS", out)
+
+    def test_filled_box(self):
+        out = zpl.label_zpl(Label(elements=[BoxElement(x=0, y=0, w=100, h=40, filled=True)]))
+        self.assertIn("^GB100,40,40,B,0^FS", out)
+
+    def test_image(self):
+        el = ImageElement(png_b64=base64.b64encode(PNG_2X2).decode(), w=2, h=2)
+        self.assertEqual(zpl.image_to_gf(el), "^GFA,2,2,1,8040")
+
+    def test_batch(self):
+        lab = Label(elements=[TextElement(text="{n}")])
+        out = zpl.batch_zpl(lab, [{"n": "1"}, {"n": "2"}])
+        self.assertEqual(out.count("^XA"), 2)
+        self.assertIn("^FD1^FS", out)
+        self.assertIn("^FD2^FS", out)
+
+
+class BarcodeTests(unittest.TestCase):
+    def test_code128_width(self):
+        widths = barcode.code128_b("ABC-12345")
+        self.assertEqual(sum(widths), barcode.code128_modules("ABC-12345"))
+        self.assertIsNone(barcode.code128_b("é"))
+
+    def test_code128_checksum(self):
+        # Start B 104 + 1*48 + 2*42 + 3*42 + 4*17 + 5*18 + 6*19 + 7*35 = 879; 879 % 103 = 55
+        widths = barcode.code128_b("PJJ123C")
+        check = widths[-13:-7]
+        self.assertEqual("".join(map(str, check)), barcode._C128[55])
+
+
+class PrintingTests(unittest.TestCase):
+    def test_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "out.zpl")
+            printing.send("^XA^XZ", printing.PrinterConfig(method="file", file_path=path))
+            with open(path) as f:
+                self.assertEqual(f.read(), "^XA^XZ")
+
+    def test_network_via_fake_printer(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        with tempfile.TemporaryDirectory() as d:
+            script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                  "tools", "fake_printer.py")
+            proc = subprocess.Popen([sys.executable, script, "--port", str(port), "--out", d],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            try:
+                cfg = printing.PrinterConfig(method="network", host="127.0.0.1", port=port)
+                for _ in range(50):
+                    try:
+                        printing.send("^XA^FDtest^FS^XZ", cfg)
+                        break
+                    except printing.PrintError:
+                        time.sleep(0.1)
+                for _ in range(50):
+                    files = [f for f in os.listdir(d) if f.endswith(".zpl")]
+                    if files:
+                        break
+                    time.sleep(0.1)
+                self.assertEqual(len(files), 1)
+                with open(os.path.join(d, files[0])) as f:
+                    self.assertEqual(f.read(), "^XA^FDtest^FS^XZ")
+            finally:
+                proc.terminate()
+                proc.wait()
+
+    def test_network_unreachable(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        with self.assertRaises(printing.PrintError):
+            printing.send("^XA^XZ", printing.PrinterConfig(method="network", port=port), timeout=1)
+
+    def test_connection_test(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+            msg = printing.test(printing.PrinterConfig(method="network", port=port))
+            self.assertIn("reachable", msg)
+        with self.assertRaises(printing.PrintError):
+            printing.test(printing.PrinterConfig(method="network", port=port), timeout=1)
+
+    def test_missing_device(self):
+        with self.assertRaises(printing.PrintError):
+            printing.send("^XA^XZ", printing.PrinterConfig(method="device", device="/nonexistent/lp9"))
+
+
+if __name__ == "__main__":
+    unittest.main()

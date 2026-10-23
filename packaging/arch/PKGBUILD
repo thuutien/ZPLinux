@@ -1,0 +1,21 @@
+# Maintainer: Your Name <you@example.com>
+pkgname=labelix
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Label designer for Zebra and other ZPL thermal printers (GTK3)"
+arch=('any')
+url="https://github.com/thuutien/labelix"
+license=('GPL-3.0-only')
+depends=('python' 'python-gobject' 'python-cairo' 'gtk3' 'pango')
+optdepends=('python-qrcode: draw QR codes in the preview'
+            'ttf-liberation: closest match to the printer font in the preview'
+            'cups: print through a raw CUPS queue'
+            'polkit: install updates from inside the app')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/thuutien/labelix/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+# Replace with the checksum printed by packaging/build-tarball.sh for the released file.
+sha256sums=('SKIP')
+
+package() {
+  cd "$pkgname-$pkgver"
+  sh install.sh --prefix-root "$pkgdir"
+}

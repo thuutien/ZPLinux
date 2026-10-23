@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-labelix">
+    <comment>Labelix label</comment>
+    <sub-class-of type="application/json"/>
+    <icon name="labelix"/>
+    <glob pattern="*.labelix"/>
+  </mime-type>
+</mime-info>

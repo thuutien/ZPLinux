@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Labelix
+GenericName=Label Designer
+Comment=Design and print labels for Zebra and other ZPL thermal printers
+Exec=labelix %f
+Icon=labelix
+Terminal=false
+Categories=Office;GTK;
+Keywords=label;zpl;zebra;barcode;qr;thermal;printer;
+MimeType=application/x-labelix;
+StartupNotify=true
