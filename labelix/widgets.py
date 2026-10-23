@@ -12,6 +12,38 @@ from gi.repository import GLib, Gtk, Pango  # noqa: E402
 from .model import UNITS, from_unit, to_unit  # noqa: E402
 
 CSS = b"""
+headerbar.accent-bar, headerbar.accent-bar:backdrop {
+    background-image: linear-gradient(to bottom, #1f6fc5, #165aa7);
+    background-color: #165aa7;
+    border-color: #0f4a8c;
+    box-shadow: inset 0 -1px rgba(0, 0, 0, 0.15);
+    color: #fff;
+}
+headerbar.accent-bar:backdrop { background-image: none; background-color: #1d63b3; }
+headerbar.accent-bar .title, headerbar.accent-bar .subtitle,
+headerbar.accent-bar label, headerbar.accent-bar image { color: #fff; }
+headerbar.accent-bar button {
+    background-image: none;
+    background-color: transparent;
+    border-color: transparent;
+    box-shadow: none;
+    color: #fff;
+    text-shadow: none;
+    -gtk-icon-shadow: none;
+}
+headerbar.accent-bar button:hover { background-color: rgba(255, 255, 255, 0.16); }
+headerbar.accent-bar button:active, headerbar.accent-bar button:checked {
+    background-color: rgba(0, 0, 0, 0.18);
+}
+headerbar.accent-bar button:disabled, headerbar.accent-bar button:disabled image { color: rgba(255, 255, 255, 0.45); }
+headerbar.accent-bar button.suggested-action {
+    background-color: #fff;
+    border-color: #fff;
+}
+headerbar.accent-bar button.suggested-action label,
+headerbar.accent-bar button.suggested-action image { color: #165aa7; font-weight: bold; }
+headerbar.accent-bar button.suggested-action:hover { background-color: #e6effa; }
+headerbar.accent-bar button.suggested-action:disabled { background-color: rgba(255, 255, 255, 0.5); }
 .sidebar { background-color: @theme_base_color; }
 .sidebar-title { font-weight: bold; font-size: 0.85em; opacity: 0.6; margin: 10px 4px 4px 4px; }
 .card {
