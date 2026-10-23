@@ -1,6 +1,6 @@
 # Maintainer: Your Name <you@example.com>
 pkgname=labelix
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Label designer for Zebra and other ZPL thermal printers (GTK3)"
 arch=('any')
@@ -12,7 +12,7 @@ optdepends=('python-qrcode: draw QR codes in the preview'
             'cups: print through a raw CUPS queue'
             'polkit: install updates from inside the app')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/thuutien/labelix/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('b9ebaf426618cc03a4139f108af6adc1a26eb6eb607ee858b9ec1a6f901e5110')
+sha256sums=('eebdd2cde4105f24838da9cae9bc156925d491b43183e477c4b2796d613f907d')
 
 package() {
   cd "$pkgname-$pkgver"
