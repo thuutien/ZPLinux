@@ -38,6 +38,8 @@ INSTALLED = HERE.startswith("/usr/")
 FAKE_PRINTER_CMD = ("labelix-fake-printer --render" if INSTALLED
                     else "python3 tools/fake_printer.py --render")
 MAX_RECENT = 8
+PRINTER_ICONS = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
+                 "cups": "printer-symbolic", "file": "text-x-generic-symbolic"}
 
 # (name, width_mm, height_mm)
 SIZE_PRESETS = [
@@ -151,7 +153,8 @@ class Window(Gtk.ApplicationWindow):
         self.set_default_size(1320, 860)
         self.set_icon_name("labelix")
         self.settings = load_settings()
-        self.printer = printing.PrinterConfig.from_dict(self.settings.get("printer", {}))
+        self.printers, self.default_printer = printing.load_printers(self.settings)
+        self.printer = self.printers[self.default_printer]   # where Print sends jobs
         self.unit = self.settings.get("units", "mm")
         self.label = Label()
         self.path: Optional[str] = None
@@ -304,7 +307,7 @@ class Window(Gtk.ApplicationWindow):
         for items in ((("Save As…", "win.save-as"), ("Export ZPL…", "win.export-zpl"),
                        ("Export PNG Preview…", "win.export-png")),
                       (("Print from CSV…", "win.print-csv"),
-                       ("Printer Settings…", "win.printer-settings")),
+                       ("Printers…", "win.printer-settings")),
                       (("Show Grid", "win.show-grid"), ("Snap to Guides", "win.snap")),
                       (("Preferences", "win.preferences"),
                        ("Keyboard Shortcuts", "win.shortcuts"),
@@ -349,27 +352,21 @@ class Window(Gtk.ApplicationWindow):
     def _build_print_popover(self) -> Gtk.Popover:
         pop = Gtk.Popover()
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
-        box.set_size_request(280, -1)
+        box.set_size_request(300, -1)
         pop.add(box)
-        t = Gtk.Label(label="Printer", xalign=0)
+        t = Gtk.Label(label="Print to", xalign=0)
         t.get_style_context().add_class("card-title")
         box.pack_start(t, False, False, 0)
-        row = Gtk.Box(spacing=10)
-        self.pp_icon = Gtk.Image()
-        row.pack_start(self.pp_icon, False, False, 0)
-        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.pp_method = Gtk.Label(xalign=0)
-        self.pp_target = dim_label("")
-        col.pack_start(self.pp_method, False, False, 0)
-        col.pack_start(self.pp_target, False, False, 0)
-        row.pack_start(col, True, True, 0)
-        box.pack_start(row, False, False, 0)
+        self.pp_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.pp_list.get_style_context().add_class("card")
+        self.pp_list.connect("row-activated", self._on_printer_row)
+        box.pack_start(self.pp_list, False, False, 0)
         self.pp_result = dim_label("")
         self.pp_result.set_selectable(True)
         self.pp_result.set_no_show_all(True)
         box.pack_start(self.pp_result, False, False, 0)
         btns = Gtk.Box(spacing=6, homogeneous=True)
-        change = Gtk.Button(label="Change…")
+        change = Gtk.Button(label="Printers…")
         change.connect("clicked", lambda *_: (pop.popdown(), self.printer_dialog()))
         test = Gtk.Button(label="Test Connection")
         test.connect("clicked", lambda *_: self._test_printer())
@@ -385,12 +382,31 @@ class Window(Gtk.ApplicationWindow):
         return pop
 
     def _update_printer_info(self):
-        icon = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
-                "cups": "printer-symbolic", "file": "text-x-generic-symbolic"}[self.printer.method]
-        self.pp_icon.set_from_icon_name(icon, Gtk.IconSize.DND)
-        self.pp_method.set_text(printing.METHOD_LABELS[self.printer.method])
-        self.pp_target.set_text(self.printer.describe())
+        for row in self.pp_list.get_children():
+            self.pp_list.remove(row)
+        for i, cfg in enumerate(self.printers):
+            row = Gtk.ListBoxRow()
+            row.printer = cfg
+            hbox = Gtk.Box(spacing=10, margin=8)
+            hbox.pack_start(Gtk.Image.new_from_icon_name(PRINTER_ICONS[cfg.method],
+                                                         Gtk.IconSize.DND), False, False, 0)
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            name = Gtk.Label(label=cfg.title(), xalign=0, ellipsize=Pango.EllipsizeMode.END)
+            col.pack_start(name, False, False, 0)
+            sub = cfg.describe() + (" · Default" if i == self.default_printer else "")
+            col.pack_start(dim_label(sub, wrap=False), False, False, 0)
+            hbox.pack_start(col, True, True, 0)
+            check = Gtk.Image.new_from_icon_name("object-select-symbolic", Gtk.IconSize.BUTTON)
+            check.set_opacity(1 if cfg is self.printer else 0)
+            hbox.pack_end(check, False, False, 0)
+            row.add(hbox)
+            self.pp_list.add(row)
+        self.pp_list.show_all()
         self.pp_result.hide()
+
+    def _on_printer_row(self, lb, row):
+        self.printer = row.printer
+        self._update_printer_info()
 
     def _test_printer(self):
         try:
@@ -1597,7 +1613,8 @@ class Window(Gtk.ApplicationWindow):
         missing = [v for v in needed if v not in cols]
         copies = self.label.copies
         detail = (f"{len(rows)} row{'s' if len(rows) != 1 else ''} × {copies} "
-                  f"cop{'y' if copies == 1 else 'ies'} to {self.printer.describe()}.\n"
+                  f"cop{'y' if copies == 1 else 'ies'} to {self.printer.title()} "
+                  f"({self.printer.describe()}).\n"
                   f"Columns: {', '.join(cols)}")
         if missing:
             detail += ("\n\nNot in the CSV (the values from the Label tab are used): "
@@ -1613,7 +1630,7 @@ class Window(Gtk.ApplicationWindow):
             path = self.choose_save("Save Print Job", "job.zpl", ("ZPL files", "*.zpl"))
             if not path:
                 return
-            cfg = printing.PrinterConfig(method="file", file_path=path)
+            cfg = printing.PrinterConfig(name=cfg.name, method="file", file_path=path)
         try:
             where = printing.send(data, cfg)
         except printing.PrintError as e:
@@ -1626,32 +1643,55 @@ class Window(Gtk.ApplicationWindow):
         except OSError as e:
             self.error("Printing failed", str(e))
             return
-        self.notify(f"Sent {what} to {where}")
+        self.notify(f"Sent {what} to {cfg.title()} ({where})")
 
     def printer_dialog(self):
-        dlg = Gtk.Dialog(title="Printer", transient_for=self, modal=True, use_header_bar=True)
+        dlg = Gtk.Dialog(title="Printers", transient_for=self, modal=True, use_header_bar=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
         dlg.set_default_response(Gtk.ResponseType.OK)
         dlg.get_widget_for_response(Gtk.ResponseType.OK).get_style_context().add_class(
             "suggested-action")
-        cfg = printing.PrinterConfig.from_dict(self.printer.to_dict())
-        grid = Gtk.Grid(column_spacing=10, row_spacing=10, margin=16)
-        dlg.get_content_area().add(grid)
+        # Edit copies; nothing changes until Save.
+        printers = [printing.PrinterConfig.from_dict(p.to_dict()) for p in self.printers]
+        in_use = printers[next(i for i, p in enumerate(self.printers) if p is self.printer)]
+        state = SimpleNamespace(current=None, default=printers[self.default_printer],
+                                loading=False)
 
+        body = Gtk.Box(spacing=16, margin=16)
+        dlg.get_content_area().add(body)
+
+        # left: the saved printers
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.pack_start(side, False, False, 0)
+        listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.BROWSE)
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, min_content_height=240,
+                                shadow_type=Gtk.ShadowType.IN)
+        sw.set_size_request(250, -1)
+        sw.add(listbox)
+        side.pack_start(sw, True, True, 0)
+        tools = Gtk.Box()
+        tools.get_style_context().add_class("linked")
+        side.pack_start(tools, False, False, 0)
+
+        # right: the selected printer
+        grid = Gtk.Grid(column_spacing=10, row_spacing=10, hexpand=True)
+        body.pack_start(grid, True, True, 0)
+        name = Gtk.Entry(hexpand=True, activates_default=True,
+                         placeholder_text="e.g. Warehouse GK420d")
+        grid.attach(Gtk.Label(label="Name", xalign=0), 0, 0, 1, 1)
+        grid.attach(name, 1, 0, 1, 1)
         method = Gtk.ComboBoxText()
         for m in printing.METHODS:
             method.append(m, printing.METHOD_LABELS[m])
-        method.set_active_id(cfg.method)
-        grid.attach(Gtk.Label(label="Connection", xalign=0), 0, 0, 1, 1)
-        grid.attach(method, 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="Connection", xalign=0), 0, 1, 1, 1)
+        grid.attach(method, 1, 1, 1, 1)
         stack = Gtk.Stack(vhomogeneous=False)
-        grid.attach(stack, 0, 1, 2, 1)
+        grid.attach(stack, 0, 2, 2, 1)
 
         g = Gtk.Grid(column_spacing=10, row_spacing=10)
-        host = Gtk.Entry(text=cfg.host, hexpand=True, activates_default=True,
+        host = Gtk.Entry(hexpand=True, activates_default=True,
                          placeholder_text="e.g. 192.168.1.50")
         port = Gtk.SpinButton.new_with_range(1, 65535, 1)
-        port.set_value(cfg.port)
         g.attach(Gtk.Label(label="Address", xalign=0), 0, 0, 1, 1)
         g.attach(host, 1, 0, 1, 1)
         g.attach(Gtk.Label(label="Port", xalign=0), 0, 1, 1, 1)
@@ -1665,7 +1705,6 @@ class Window(Gtk.ApplicationWindow):
         found = printing.usb_devices()
         for d in found:
             dev.append_text(d)
-        dev.get_child().set_text(cfg.device)
         dev.set_hexpand(True)
         g.attach(Gtk.Label(label="Device", xalign=0), 0, 0, 1, 1)
         g.attach(dev, 1, 0, 1, 1)
@@ -1678,7 +1717,6 @@ class Window(Gtk.ApplicationWindow):
         queue = Gtk.ComboBoxText.new_with_entry()
         for q in printing.cups_queues():
             queue.append_text(q)
-        queue.get_child().set_text(cfg.cups_queue)
         queue.set_hexpand(True)
         g.attach(Gtk.Label(label="Printer", xalign=0), 0, 0, 1, 1)
         g.attach(queue, 1, 0, 1, 1)
@@ -1687,27 +1725,151 @@ class Window(Gtk.ApplicationWindow):
         stack.add_named(g, "cups")
 
         g = Gtk.Grid(column_spacing=10, row_spacing=10)
-        fentry = Gtk.Entry(text=cfg.file_path, hexpand=True, placeholder_text="Ask each time")
+        fentry = Gtk.Entry(hexpand=True, placeholder_text="Ask each time")
         g.attach(Gtk.Label(label="File", xalign=0), 0, 0, 1, 1)
         g.attach(fentry, 1, 0, 1, 1)
         g.attach(dim_label("Writes print jobs to a .zpl file instead of a printer."), 0, 1, 2, 1)
         stack.add_named(g, "file")
 
-        method.connect("changed", lambda c: stack.set_visible_child_name(c.get_active_id()))
-        dlg.set_default_size(480, -1)
-        dlg.show_all()
-        stack.set_visible_child_name(cfg.method)
-        if dlg.run() == Gtk.ResponseType.OK:
+        default = Gtk.CheckButton(label="Default printer")
+        grid.attach(default, 0, 3, 2, 1)
+        test_row = Gtk.Box(spacing=10)
+        test = Gtk.Button(label="Test Connection")
+        result = dim_label("")
+        result.set_selectable(True)
+        test_row.pack_start(test, False, False, 0)
+        test_row.pack_start(result, True, True, 0)
+        grid.attach(test_row, 0, 4, 2, 1)
+
+        def store():
+            """Copy the form into the printer being edited."""
+            cfg = state.current
+            if cfg is None or state.loading:
+                return
+            cfg.name = name.get_text().strip()
             cfg.method = method.get_active_id()
             cfg.host = host.get_text().strip()
             cfg.port = port.get_value_as_int()
             cfg.device = dev.get_child().get_text().strip()
             cfg.cups_queue = queue.get_child().get_text().strip()
             cfg.file_path = fentry.get_text().strip()
-            self.printer = cfg
-            self.settings["printer"] = cfg.to_dict()
+
+        def load(cfg):
+            state.loading = True
+            state.current = cfg
+            name.set_text(cfg.name)
+            method.set_active_id(cfg.method)
+            stack.set_visible_child_name(cfg.method)
+            host.set_text(cfg.host)
+            port.set_value(cfg.port)
+            dev.get_child().set_text(cfg.device)
+            queue.get_child().set_text(cfg.cups_queue)
+            fentry.set_text(cfg.file_path)
+            default.set_active(cfg is state.default)
+            default.set_sensitive(cfg is not state.default)   # always keep one default
+            result.set_text("")
+            state.loading = False
+
+        def update_row(row):
+            row.label.set_text(row.printer.name or "Unnamed printer")
+            row.tag.set_visible(row.printer is state.default)
+
+        def fill_list(select):
+            for row in listbox.get_children():
+                listbox.remove(row)
+            for cfg in printers:
+                row = Gtk.ListBoxRow()
+                row.printer = cfg
+                hbox = Gtk.Box(spacing=8, margin=6)
+                hbox.pack_start(Gtk.Image.new_from_icon_name(PRINTER_ICONS[cfg.method],
+                                                             Gtk.IconSize.BUTTON), False, False, 0)
+                row.label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+                hbox.pack_start(row.label, True, True, 0)
+                row.tag = dim_label("Default", wrap=False)
+                row.tag.set_no_show_all(True)
+                hbox.pack_end(row.tag, False, False, 0)
+                update_row(row)
+                row.add(hbox)
+                listbox.add(row)
+                if cfg is select:
+                    listbox.select_row(row)
+            listbox.show_all()
+            remove.set_sensitive(len(printers) > 1)
+
+        def selected(_lb, row):
+            if row is not None and row.printer is not state.current:
+                store()
+                load(row.printer)
+
+        def changed(*_):
+            store()
+            row = listbox.get_selected_row()
+            if row is not None and not state.loading:
+                update_row(row)
+
+        def method_changed(c):
+            stack.set_visible_child_name(c.get_active_id())
+            if not state.loading:
+                store()
+                fill_list(state.current)
+
+        def add():
+            store()
+            cfg = printing.PrinterConfig(name=f"Printer {len(printers) + 1}", host="")
+            printers.append(cfg)
+            fill_list(cfg)
+            name.grab_focus()
+
+        def delete():
+            cfg = state.current
+            if cfg is None or len(printers) < 2:
+                return
+            i = next(i for i, p in enumerate(printers) if p is cfg)
+            del printers[i]
+            if state.default is cfg:
+                state.default = printers[0]
+            state.current = None
+            fill_list(printers[min(i, len(printers) - 1)])
+
+        def default_toggled(b):
+            if state.loading or not b.get_active():
+                return
+            state.default = state.current
+            b.set_sensitive(False)
+            for row in listbox.get_children():
+                update_row(row)
+
+        def run_test():
+            store()
+            try:
+                result.set_text("✓ " + printing.test(state.current))
+            except printing.PrintError as e:
+                result.set_text("✗ " + str(e))
+
+        addb = icon_button("list-add-symbolic", "Add printer", add, flat=False)
+        remove = icon_button("list-remove-symbolic", "Remove printer", delete, flat=False)
+        tools.pack_start(addb, False, False, 0)
+        tools.pack_start(remove, False, False, 0)
+        listbox.connect("row-selected", selected)
+        for w in (name, host, fentry, dev.get_child(), queue.get_child()):
+            w.connect("changed", changed)
+        port.connect("value-changed", changed)
+        method.connect("changed", method_changed)
+        default.connect("toggled", default_toggled)
+        test.connect("clicked", lambda *_: run_test())
+
+        dlg.set_default_size(760, -1)
+        dlg.show_all()
+        fill_list(in_use)
+        if dlg.run() == Gtk.ResponseType.OK:
+            store()
+            index = next(i for i, p in enumerate(printers) if p is state.default)
+            printing.store_printers(self.settings, printers, index)
             save_settings(self.settings)
-            self.notify(f"Printer set to {printing.METHOD_LABELS[cfg.method]}: {cfg.describe()}")
+            self.printers, self.default_printer = printers, index
+            self.printer = in_use if any(p is in_use for p in printers) else state.default
+            self.notify(f"{len(printers)} printer{'s' if len(printers) != 1 else ''} saved · "
+                        f"default: {state.default.name}")
         dlg.destroy()
 
     # ---- preferences --------------------------------------------------------

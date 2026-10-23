@@ -127,7 +127,10 @@ You can also paste the ZPL from the ZPL tab into the
 
 ## Connecting a real printer
 
-Open **Printer settings** (the button next to Print):
+Open **Printers…** (in the menu next to Print) to add as many printers as you
+like, give each a name, and mark one as the **default**. Labelix prints to the
+default printer; the menu next to Print lets you pick another one for this
+session. Each printer connects in one of these ways:
 
 - **Network**: the printer's IP address, port 9100.
 - **USB device file**: usually `/dev/usb/lp0`. Your user needs to be in the

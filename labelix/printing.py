@@ -8,7 +8,7 @@ import shutil
 import socket
 import subprocess
 from dataclasses import asdict, dataclass
-from typing import List
+from typing import List, Tuple
 
 METHODS = ("network", "device", "cups", "file")
 METHOD_LABELS = {
@@ -21,6 +21,7 @@ METHOD_LABELS = {
 
 @dataclass
 class PrinterConfig:
+    name: str = ""
     method: str = "network"
     host: str = "127.0.0.1"   # the bundled fake printer listens here by default
     port: int = 9100
@@ -43,6 +44,52 @@ class PrinterConfig:
         if self.method == "cups":
             return f"CUPS: {self.cups_queue or '(none)'}"
         return self.file_path or "file"
+
+    def title(self) -> str:
+        return self.name or METHOD_LABELS.get(self.method, self.method)
+
+
+DEFAULT_NAME = "Test printer (this computer)"
+
+
+def load_printers(settings: dict) -> Tuple[List[PrinterConfig], int]:
+    """Saved printers and the index of the default one.
+
+    Older settings kept one unnamed printer under "printer"; it becomes the
+    only (and default) entry. With nothing saved, the list holds the local
+    fake printer so Print works out of the box."""
+    raw = settings.get("printers")
+    if isinstance(raw, list) and raw:
+        printers = [PrinterConfig.from_dict(d) for d in raw if isinstance(d, dict)]
+    elif isinstance(settings.get("printer"), dict):
+        printers = [PrinterConfig.from_dict(settings["printer"])]
+    else:
+        printers = []
+    if not printers:
+        printers = [PrinterConfig(name=DEFAULT_NAME)]
+    unique_names(printers)
+    default = settings.get("default_printer")
+    index = next((i for i, p in enumerate(printers) if p.name == default), 0)
+    return printers, index
+
+
+def store_printers(settings: dict, printers: List[PrinterConfig], default: int) -> None:
+    unique_names(printers)
+    settings["printers"] = [p.to_dict() for p in printers]
+    settings["default_printer"] = printers[default].name if printers else ""
+    settings.pop("printer", None)
+
+
+def unique_names(printers: List[PrinterConfig]) -> None:
+    """Give every printer a non-empty name that no other printer uses."""
+    seen = set()
+    for i, p in enumerate(printers, 1):
+        base = p.name.strip() or f"Printer {i}"
+        name, n = base, 2
+        while name in seen:
+            name, n = f"{base} ({n})", n + 1
+        p.name = name
+        seen.add(name)
 
 
 class PrintError(Exception):
