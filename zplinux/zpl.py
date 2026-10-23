@@ -183,11 +183,12 @@ def visible_zpl(el, label: Label) -> List[str]:
 
 
 def to_print(lab: Label) -> Label:
-    """The label as the printer sees it. A design turned on screen (orientation) is
-    turned back: every element moves and turns with it, and width and height swap at 90
-    and 270 degrees. lab is changed in place (it is the filled copy) and returned."""
+    """The label as the printer sees it: with an orientation, the design is turned onto
+    the label stock, every element moving and turning with it, and width and height
+    swap at 90 and 270 degrees. lab is changed in place (it is the filled copy)."""
     if lab.orientation % 360:
-        lab.turn_design(0)
+        lab.turn_content(lab.orientation)
+        lab.orientation = 0
     return lab
 
 
