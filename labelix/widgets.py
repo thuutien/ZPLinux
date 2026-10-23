@@ -44,6 +44,10 @@ headerbar.accent-bar button.suggested-action label,
 headerbar.accent-bar button.suggested-action image { color: #165aa7; font-weight: bold; }
 headerbar.accent-bar button.suggested-action:hover { background-color: #e6effa; }
 headerbar.accent-bar button.suggested-action:disabled { background-color: rgba(255, 255, 255, 0.5); }
+.doc-tabs tab { padding: 2px 4px 2px 12px; min-height: 26px; }
+.doc-tabs tab:checked { box-shadow: inset 0 -3px #165aa7; }
+.doc-tabs .tab-close { padding: 2px; min-height: 18px; min-width: 18px; }
+.doc-tabs > header > box > button { margin: 2px 6px; }
 .sidebar { background-color: @theme_base_color; }
 .sidebar-title { font-weight: bold; font-size: 0.85em; opacity: 0.6; margin: 10px 4px 4px 4px; }
 .card {

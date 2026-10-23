@@ -20,6 +20,8 @@ Labelix designs labels on any Linux desktop and sends real ZPL to the printer.
 
 - **Start screen** with ready-made templates (shipping, product, price tag,
   address, asset tag, blank sizes) and your recent labels
+- **Tabs**: open and edit several labels at once, each with its own undo
+  history and zoom (Ctrl+T new, Ctrl+W close, Ctrl+PageUp/PageDown to switch)
 - **Canvas**: text, Code 128 barcodes, QR codes, boxes/lines, ellipses and
   images (converted to 1-bit for thermal printing). Drag to move, drag the
   round handle to resize, double-click to edit content, right-click for more

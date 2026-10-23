@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Callable, List, Optional
 from urllib.parse import unquote, urlparse
@@ -147,7 +148,40 @@ def file_paths(data) -> List[str]:
             if urlparse(u).scheme == "file"]
 
 
+@dataclass(eq=False)          # each open document is its own tab, even if two look alike
+class Document:
+    """One open label (one tab): the label itself and everything that goes with editing it."""
+    label: Label = field(default_factory=Label)
+    values: dict = field(default_factory=dict)   # preview/print values for {variables}
+    path: Optional[str] = None
+    dirty: bool = False
+    selected: Optional[Element] = None
+    undo_stack: List[str] = field(default_factory=list)
+    redo_stack: List[str] = field(default_factory=list)
+    undo_key: Optional[str] = None
+    zoom: Optional[float] = None                 # None: fit to the window when shown
+    panel: str = "element"
+
+    def name(self) -> str:
+        return os.path.basename(self.path) if self.path else "Untitled label"
+
+
+def _doc_property(attr):
+    return property(lambda self: getattr(self.doc, attr),
+                    lambda self, v: setattr(self.doc, attr, v))
+
+
 class Window(Gtk.ApplicationWindow):
+    # The editor works on the document in the current tab.
+    label = _doc_property("label")
+    values = _doc_property("values")
+    path = _doc_property("path")
+    dirty = _doc_property("dirty")
+    selected = _doc_property("selected")
+    undo_stack = _doc_property("undo_stack")
+    redo_stack = _doc_property("redo_stack")
+    undo_key = _doc_property("undo_key")
+
     def __init__(self, app, path: Optional[str] = None):
         super().__init__(application=app, title=APP_NAME)
         self.set_default_size(1320, 860)
@@ -156,14 +190,9 @@ class Window(Gtk.ApplicationWindow):
         self.printers, self.default_printer = printing.load_printers(self.settings)
         self.printer = self.printers[self.default_printer]   # where Print sends jobs
         self.unit = self.settings.get("units", "mm")
-        self.label = Label()
-        self.path: Optional[str] = None
-        self.dirty = False
-        self.selected: Optional[Element] = None
-        self.values: dict = {}           # preview/print values for {variables}
-        self.undo_stack: List[str] = []
-        self.redo_stack: List[str] = []
-        self.undo_key: Optional[str] = None
+        self.doc = Document()            # stand-in while no label is open
+        self.docs: List[Document] = []   # in tab order
+        self._switching_tabs = False
         self.props_form: Optional[PropertyForm] = None
         self.latest: Optional[updater.Release] = None
         self.updating = False
@@ -201,6 +230,7 @@ class Window(Gtk.ApplicationWindow):
 
         self.show_all()
         self.toast.set_reveal_child(False)
+        self.tabs.hide()
         if path:
             self.open_path(path)
         else:
@@ -235,7 +265,11 @@ class Window(Gtk.ApplicationWindow):
             if accels:
                 app.set_accels_for_action(f"win.{name}", list(accels))
 
-        add("new", self.new_label, ["<Primary>n"])
+        add("new", self.new_label, ["<Primary>n", "<Primary>t"])
+        add("close-tab", lambda: self.close_document(self.doc), ["<Primary>w"])
+        add("next-tab", lambda: self.cycle_tab(1), ["<Primary>Page_Down", "<Primary>Tab"])
+        add("prev-tab", lambda: self.cycle_tab(-1),
+            ["<Primary>Page_Up", "<Primary><Shift>Tab", "<Primary><Shift>ISO_Left_Tab"])
         add("open", self.open_dialog, ["<Primary>o"])
         add("save", self.save, ["<Primary>s"])
         add("save-as", self.save_as, ["<Primary><Shift>s"])
@@ -267,7 +301,8 @@ class Window(Gtk.ApplicationWindow):
         self.canvas.snap = v
 
     EDITOR_ACTIONS = ("save", "save-as", "export-zpl", "export-png", "print", "print-csv",
-                      "undo", "redo", "duplicate", "zoom-in", "zoom-out", "zoom-100", "zoom-fit")
+                      "undo", "redo", "duplicate", "zoom-in", "zoom-out", "zoom-100", "zoom-fit",
+                      "close-tab", "next-tab", "prev-tab")
 
     def _editor_actions_enabled(self, on: bool):
         for name in self.EDITOR_ACTIONS:
@@ -292,6 +327,11 @@ class Window(Gtk.ApplicationWindow):
             b.set_action_name(action)
             return b
 
+        self.back_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.BUTTON)
+        self.back_btn.set_tooltip_text("Back to the open labels (Esc)")
+        self.back_btn.connect("clicked", lambda *_: self.show_editor())
+        self.back_btn.set_no_show_all(True)
+        hb.pack_start(self.back_btn)
         hb.pack_start(action_button("document-new-symbolic", "New label (Ctrl+N)", "win.new"))
         hb.pack_start(action_button("document-open-symbolic", "Open (Ctrl+O)", "win.open"))
         hist = Gtk.Box()
@@ -578,23 +618,37 @@ class Window(Gtk.ApplicationWindow):
         self.stack.set_visible_child_name("welcome")
         for w in (self.hist_box, self.print_box, self.save_btn):
             w.hide()
+        self.back_btn.set_visible(bool(self.docs))
+        self.tabs.hide()
         self._editor_actions_enabled(False)
         self.header.set_subtitle(None)
-        self.path = None
-        self.dirty = False
 
     def show_editor(self):
         self.stack.set_visible_child_name("editor")
         for w in (self.hist_box, self.print_box, self.save_btn):
             w.show()
+        self.back_btn.hide()
+        self.tabs.show()
         self._editor_actions_enabled(True)
         self.update_title()
-        GLib.idle_add(self.zoom_fit)
 
     # ---- editor layout ------------------------------------------------------
 
     def _build_editor(self) -> Gtk.Widget:
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # The notebook is only the tab strip: its pages are empty and every tab shares
+        # the editor below, which shows the current tab's document.
+        self.tabs = Gtk.Notebook(scrollable=True, show_border=False)
+        self.tabs.get_style_context().add_class("doc-tabs")
+        self.tabs.connect("switch-page", self._on_switch_tab)
+        self.tabs.connect("page-reordered", self._on_tabs_reordered)
+        new_tab = icon_button("tab-new-symbolic", "New label (Ctrl+T)", self.new_label)
+        new_tab.show()
+        self.tabs.set_action_widget(new_tab, Gtk.PackType.END)
+        self.tabs.set_no_show_all(True)
+        outer.pack_start(self.tabs, False, False, 0)
         main = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        outer.pack_start(main, True, True, 0)
 
         # Left sidebar: insert tiles + layers
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -681,7 +735,7 @@ class Window(Gtk.ApplicationWindow):
         self.panel_stack.add_titled(self.label_box, "label", "Label")
         self.panel_stack.add_titled(self._build_zpl_page(), "zpl", "ZPL")
         main.pack_start(right, False, False, 0)
-        return main
+        return outer
 
     def _build_zpl_page(self) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
@@ -708,35 +762,104 @@ class Window(Gtk.ApplicationWindow):
     # ---- document -----------------------------------------------------------
 
     def new_label(self):
-        if self.confirm_discard():
-            self.show_welcome()
+        """Show the start screen; the label picked there opens in a new tab."""
+        self.show_welcome()
 
     def start_from(self, factory: Callable) -> bool:
-        if self.in_editor() and not self.confirm_discard():
-            return False
-        self.label, self.values = factory()
-        self.path = None
-        self._load_document()
+        label, values = factory()
+        self.add_document(Document(label=label, values=values))
         return True
 
-    def _load_document(self):
-        self._reset_history()
-        self.selected = None
+    def add_document(self, doc: Document):
+        page = Gtk.Box()
+        page.doc = doc
+        tab = Gtk.Box(spacing=4)
+        tab.title = Gtk.Label(ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=24)
+        tab.pack_start(tab.title, True, True, 0)
+        close = icon_button("window-close-symbolic", "Close (Ctrl+W)",
+                            lambda: self.close_document(doc))
+        close.get_style_context().add_class("tab-close")
+        tab.pack_start(close, False, False, 0)
+        tab.show_all()
+        page.show()
+        doc.page, doc.tab = page, tab
+        self.docs.append(doc)
+        self._update_tab(doc)
+        n = self.tabs.append_page(page, tab)
+        self.tabs.set_tab_reorderable(page, True)
+        self.tabs.child_set_property(page, "tab-expand", False)
+        self.show_editor()
+        if self.tabs.get_current_page() == n:
+            self.switch_to(doc)       # the first tab: switch-page already fired
+        else:
+            self.tabs.set_current_page(n)
+
+    def _update_tab(self, doc: Document):
+        text = ("• " if doc.dirty else "") + doc.name()
+        doc.tab.title.set_text(text)
+        doc.tab.title.set_width_chars(min(len(text), 24))
+        doc.tab.set_tooltip_text(doc.path or doc.name())
+
+    def _on_switch_tab(self, _nb, page, _n):
+        if not self._switching_tabs:
+            self.switch_to(page.doc)
+
+    def _on_tabs_reordered(self, nb, _page, _n):
+        self.docs = [nb.get_nth_page(i).doc for i in range(nb.get_n_pages())]
+
+    def switch_to(self, doc: Document):
+        """Show doc in the editor, keeping the old document's zoom and panel."""
+        if self.doc in self.docs and self.doc is not doc:
+            self.doc.zoom = self.canvas.zoom
+            self.doc.panel = self.panel_stack.get_visible_child_name()
+        self.doc = doc
+        self._switching_tabs = True
+        self.tabs.set_current_page(self.tabs.page_num(doc.page))
+        self._switching_tabs = False
         self.props_form = None
         self._layers_sig = None
-        self.dirty = False
+        self._shown_vars = None
         self.refresh_label_panel()
         self.build_props()
-        self.canvas.resize_to_label()
+        self.panel_stack.set_visible_child_name(doc.panel)
         self.refresh_zpl()
         self.refresh_layers()
         self.update_status()
         self.show_editor()
+        self._update_history_buttons()
+        if doc.zoom is None:
+            self.canvas.resize_to_label()
+            GLib.idle_add(self.zoom_fit)
+        else:
+            self.set_zoom(doc.zoom)
+
+    def cycle_tab(self, step: int):
+        if len(self.docs) > 1 and self.in_editor():
+            i = self.docs.index(self.doc)
+            self.switch_to(self.docs[(i + step) % len(self.docs)])
+
+    def close_document(self, doc: Document) -> bool:
+        if doc not in self.docs:
+            return True
+        if doc.dirty:
+            self.switch_to(doc)
+            if not self.confirm_discard():
+                return False
+        self.docs.remove(doc)
+        self._switching_tabs = True
+        self.tabs.remove_page(self.tabs.page_num(doc.page))
+        self._switching_tabs = False
+        if not self.docs:
+            self.doc = Document()
+            self.show_welcome()
+        elif doc is self.doc:
+            self.doc = Document()     # closed: nothing to remember for it
+            self.switch_to(self.docs[min(self.tabs.get_current_page(), len(self.docs) - 1)])
+        return True
 
     def open_dialog(self):
-        if not self.confirm_discard():
-            return
         dlg = Gtk.FileChooserNative.new("Open Label", self, Gtk.FileChooserAction.OPEN, None, None)
+        dlg.set_select_multiple(True)
         f = Gtk.FileFilter()
         f.set_name("Labelix labels (*.labelix)")
         f.add_pattern("*.labelix")
@@ -744,9 +867,15 @@ class Window(Gtk.ApplicationWindow):
         dlg.add_filter(f)
         self._set_dialog_folder(dlg)
         if dlg.run() == Gtk.ResponseType.ACCEPT:
-            self.open_path(dlg.get_filename())
+            for path in dlg.get_filenames():
+                self.open_path(path)
 
     def open_path(self, path):
+        same = next((d for d in self.docs if d.path and os.path.abspath(d.path)
+                     == os.path.abspath(path)), None)
+        if same:
+            self.switch_to(same)
+            return
         try:
             with open(path) as f:
                 text = f.read()
@@ -755,10 +884,9 @@ class Window(Gtk.ApplicationWindow):
         except (OSError, ValueError, KeyError, TypeError) as e:
             self.error("Could not open label", str(e))
             return
-        self.label, self.values, self.path = label, values, path
         self._remember_folder(path)
         self._add_recent(path)
-        self._load_document()
+        self.add_document(Document(label=label, values=values, path=path))
 
     def _document_json(self) -> str:
         d = json.loads(self.label.to_json())
@@ -843,15 +971,21 @@ class Window(Gtk.ApplicationWindow):
         return r == Gtk.ResponseType.NO
 
     def on_delete_event(self, *_):
-        return not self.confirm_discard()
+        """Closing the window: offer to save every tab with changes."""
+        for doc in [d for d in self.docs if d.dirty]:
+            self.switch_to(doc)
+            if not self.confirm_discard():
+                return True
+            doc.dirty = False
+        return False
 
     def drop_files(self, paths, x=None, y=None):
         """Files dropped on the window or canvas: open labels, add images."""
-        for p in paths:
-            if p.lower().endswith((".labelix", ".json")):
-                if self.confirm_discard():
-                    self.open_path(p)
-                return
+        labels = [p for p in paths if p.lower().endswith((".labelix", ".json"))]
+        if labels:
+            for p in labels:
+                self.open_path(p)
+            return
         if not self.in_editor():
             self.notify("Start or open a label first, then drop images onto it.")
             return
@@ -1058,6 +1192,8 @@ class Window(Gtk.ApplicationWindow):
 
     def activate_element(self, el: Element):
         """Double-click or Enter: jump to the element's main field."""
+        if not any(e is el for e in self.label.elements):
+            return False          # queued for a tab that is no longer the current one
         if el is not self.selected:
             self.select(el)
         self.panel_stack.set_visible_child_name("element")
@@ -1420,8 +1556,9 @@ class Window(Gtk.ApplicationWindow):
     # ---- refresh ------------------------------------------------------------
 
     def update_title(self):
-        name = os.path.basename(self.path) if self.path else "Untitled label"
-        self.header.set_subtitle(("• " if self.dirty else "") + name)
+        self.header.set_subtitle(("• " if self.dirty else "") + self.doc.name())
+        if self.doc in self.docs:
+            self._update_tab(self.doc)
 
     def current_zpl(self) -> str:
         return zpl.label_zpl(self.label, self.values)
@@ -1534,6 +1671,9 @@ class Window(Gtk.ApplicationWindow):
 
     def on_key(self, widget, ev):
         if not self.in_editor():
+            if Gdk.keyval_name(ev.keyval) == "Escape" and self.docs:
+                self.show_editor()
+                return True
             return False
         key = Gdk.keyval_name(ev.keyval) or ""
         # Leave typing keys alone while an input field has focus; Escape returns to the canvas.
@@ -1923,9 +2063,11 @@ class Window(Gtk.ApplicationWindow):
 
     def shortcuts_window(self):
         ui = SHORTCUTS_UI.format(
-            files=_shortcut_rows([("<Primary>n", "New label"), ("<Primary>o", "Open"),
+            files=_shortcut_rows([("<Primary>n", "New label in a new tab"), ("<Primary>o", "Open"),
                                   ("<Primary>s", "Save"), ("<Primary><Shift>s", "Save as"),
-                                  ("<Primary>e", "Export ZPL"), ("<Primary>p", "Print")]),
+                                  ("<Primary>e", "Export ZPL"), ("<Primary>p", "Print"),
+                                  ("<Primary>w", "Close tab"),
+                                  ("<Primary>Page_Down <Primary>Page_Up", "Next / previous tab")]),
             editing=_shortcut_rows([("<Primary>z", "Undo"), ("<Primary><Shift>z", "Redo"),
                                     ("<Primary>d", "Duplicate"), ("Delete", "Delete"),
                                     ("Tab", "Select next element"),
@@ -2043,9 +2185,9 @@ class Window(Gtk.ApplicationWindow):
         return False
 
     def restart(self):
-        if not self.confirm_discard():
+        if self.on_delete_event():
             return
-        argv = [sys.argv[0]] + ([self.path] if self.path else [])
+        argv = [sys.argv[0]] + [d.path for d in self.docs if d.path]
         os.execv(sys.executable, [sys.executable] + argv)
 
     # ---- dialogs ------------------------------------------------------------
@@ -2099,10 +2241,11 @@ class App(Gtk.Application):
         self.window.present()
 
     def do_open(self, files, n, hint):
-        path = files[0].get_path() if files else None
+        paths = [f.get_path() for f in files if f.get_path()]
         if not self.window:
-            self.window = Window(self, path)
-        elif path and self.window.confirm_discard():
+            self.window = Window(self, paths[0] if paths else None)
+            paths = paths[1:]
+        for path in paths:
             self.window.open_path(path)
         self.window.present()
 
