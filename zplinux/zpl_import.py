@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import barcode, symbology
 from .model import (BarcodeElement, BoxElement, Code128Element, EllipseElement, ImageElement,
-                    Label, QRElement, TextElement, dpmm)
+                    Label, QRElement, TextElement, dpmm, rotate_rect)
 from .zpl import QR_Y_SHIFT
 
 # Where things land relative to ^FT, measured against Labelary at 203 dpi:
@@ -423,6 +423,17 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
             continue
         label.elements.append(el)
 
+    if any(el.rotation for el in label.elements):
+        # A rotated barcode's ^FO is the corner of its bars; ZPLinux places the whole
+        # element (bars and text), so move it by where the bars sit in it.
+        from . import render
+        render.measure(label)
+        for el in label.elements:
+            if el.rotation and _anchored_at_bars(el):
+                w0, h0 = el.size()
+                ax, ay, _w, _h = rotate_rect((0, 0, w0, el.height), w0, h0, el.rotation)
+                el.x, el.y = round(el.x - ax), round(el.y - ay)
+
     if not label.elements:
         raise ZplImportError("The label has nothing ZPLinux can show (no text, codes, "
                              "boxes or graphics).")
@@ -437,9 +448,22 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
     return ImportResult(label, values, warnings)
 
 
+DEGREES = {"N": 0, "R": 90, "I": 180, "B": 270}
+
+
+def _anchored_at_bars(el) -> bool:
+    if isinstance(el, Code128Element):
+        return True
+    if isinstance(el, BarcodeElement):
+        sym = symbology.get(el.symbology)
+        return sym is not None and sym.shape in ("linear", "postal")
+    return False
+
+
 def _is_barcode_text(bc, el) -> bool:
     """A centered one-line font 0 text right under a barcode that repeats its data."""
     return (isinstance(bc, Code128Element) and not bc.show_text
+            and not bc.rotation and not el.rotation
             and isinstance(el, TextElement) and el.text == bc.data
             and el.block_width and el.max_lines == 1 and el.align == "C"
             and not el.width and not el.reverse
@@ -465,8 +489,8 @@ def _barcode(f: _Field, data: str, note) -> BarcodeElement:
     num = lambda i: _ints(arg(i), 1)[0]
     el = BarcodeElement(x=f.x, y=f.y, symbology=key, data=data, module=f.module,
                         ratio=f.ratio, height=f.bar_height)
-    if cmd != "BD" and arg(0)[:1].upper() not in ("", "N"):
-        note("Rotated barcodes were imported upright.")
+    if cmd != "BD":
+        el.rotation = DEGREES.get(arg(0)[:1].upper(), 0) if el.can_rotate() else 0
     if cmd in HEIGHT_PARAM or cmd in TEXT_PARAM or cmd in ("B4", "B7", "BB", "BF", "BL"):
         el.height = num(HEIGHT_PARAM.get(cmd, 1)) or f.bar_height
     if cmd in TEXT_PARAM:
@@ -525,14 +549,12 @@ def _element(f: _Field, default_font, graphics, values, note):
         values[var] = data
         data = "{" + var + "}"
         note("Numbered fields (^FN) became variables named field1, field2 ...")
-    if f.rotation not in ("N", "") and f.kind is None:
-        note("Rotated text was imported upright.")
 
     if f.kind is None:
         h = f.height or default_font[1] or 30
         w = f.width or (default_font[2] if not f.height else 0)
         el = TextElement(x=f.x, y=f.y, height=h, width=0 if w == h else w,
-                         reverse=f.reverse)
+                         reverse=f.reverse, rotation=DEGREES.get(f.rotation, 0))
         if f.block:
             bw, lines, align = f.block
             if not lines:      # ^TB: lines from the block height
@@ -544,6 +566,8 @@ def _element(f: _Field, default_font, graphics, values, note):
         if f.typeset:
             lines = el.max_lines if el.block_width else 1
             el.y = f.y - (lines - 1) * h - int(FT_BASELINE * h)
+            if el.rotation:
+                note("Rotated text placed by its baseline (^FT) may sit a little off.")
         el.y = max(0, el.y)
         return el
 
@@ -554,8 +578,6 @@ def _element(f: _Field, default_font, graphics, values, note):
         line = (p[2].strip().upper() if len(p) > 2 and p[2].strip() else "Y") == "Y"
         if len(p) > 3 and p[3].strip().upper() == "Y":
             note("Text above Code 128 barcodes was moved below them.")
-        if rot != "N":
-            note("Rotated barcodes were imported upright.")
         if len(p) > 5 and p[5].strip().upper() == "D":
             el = BarcodeElement(x=f.x, y=f.y, symbology="gs1-128", data=data, height=h,
                                 module=module, show_text=line)
@@ -563,7 +585,7 @@ def _element(f: _Field, default_font, graphics, values, note):
                 el.y = max(0, f.y - h)
             return el
         el = Code128Element(x=f.x, y=f.y, data=_code128_data(data), height=h,
-                            module=module, show_text=line)
+                            module=module, show_text=line, rotation=DEGREES.get(rot, 0))
         if line and f.height:
             # ^A before ^BC sets the font of the printer's own barcode text.
             el.text_size = f.height

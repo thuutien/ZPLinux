@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional
 
-from . import barcode
-from . import symbology
-from .model import (BarcodeElement, BoxElement, Code128Element, EllipseElement, ImageElement, Label,
-                    QRElement, TextElement)
+from . import barcode, symbology
+from .model import (BarcodeElement, BoxElement, Code128Element, EllipseElement,
+                    ImageElement, Label, QRElement, TextElement, rotate_rect)
 
 
 QR_Y_SHIFT = 10
@@ -43,6 +42,10 @@ def image_to_gf(el: ImageElement) -> Optional[str]:
     pb = loader.get_pixbuf().scale_simple(el.w, el.h, GdkPixbuf.InterpType.BILINEAR)
     if pb is None:
         return None
+    turns = {90: GdkPixbuf.PixbufRotation.CLOCKWISE, 180: GdkPixbuf.PixbufRotation.UPSIDEDOWN,
+             270: GdkPixbuf.PixbufRotation.COUNTERCLOCKWISE}
+    if el.rotation % 360 in turns:      # ^GF has no orientation: turn the image itself
+        pb = pb.rotate_simple(turns[el.rotation % 360])
     w, h = pb.get_width(), pb.get_height()
     n, stride = pb.get_n_channels(), pb.get_rowstride()
     has_alpha = pb.get_has_alpha()
@@ -66,6 +69,26 @@ def image_to_gf(el: ImageElement) -> Optional[str]:
     return f"^GFA,{total},{total},{row_bytes},{''.join(out)}"
 
 
+ORIENTATIONS = {0: "N", 90: "R", 180: "I", 270: "B"}
+
+
+def orientation(el) -> str:
+    """The ZPL field orientation for an element's rotation."""
+    return ORIENTATIONS.get(el.rotation % 360, "N")
+
+
+def field_origin(el, anchor=None) -> str:
+    """^FO for an element. A rotated field's ^FO is the top-left of its rotated anchor:
+    the whole element for text, the bars for barcodes (their text then sits on the
+    bars' far side), as measured on Labelary. anchor is (x, y, w, h) upright."""
+    x, y = el.x, el.y
+    if el.rotation % 360 and anchor is not None:
+        w0, h0 = el.size()
+        ax, ay, _w, _h = rotate_rect(anchor, w0, h0, el.rotation)
+        x, y = x + ax, y + ay
+    return f"^FO{max(0, round(x))},{max(0, round(y))}"
+
+
 def barcode_text_zpl(el: Code128Element) -> str:
     """The line under a barcode when it has its own text size: font 0, centered under
     the bars in a one-line ^FB (as ZebraDesigner does), widened if the text is longer
@@ -75,16 +98,20 @@ def barcode_text_zpl(el: Code128Element) -> str:
     s = el.text_size
     # Font 0 digits and capitals are a little over half as wide as they are tall.
     block = max(bars, int(len(el.data) * s * 0.6) + s)
-    x = max(0, el.x - (block - bars) // 2)
-    y = el.y + el.height + el.text_gap()
-    return (f"^FO{x},{y}^A0N,{s},{s}^FB{block},1,0,C,0"
+    line = (-((block - bars) // 2), el.height + el.text_gap(), block, s)   # upright
+    if el.rotation % 360:
+        fo = field_origin(el, line)
+    else:
+        fo = f"^FO{max(0, el.x + line[0])},{el.y + line[1]}"
+    return (f"{fo}^A0{orientation(el)},{s},{s}^FB{block},1,0,C,0"
             + field_data(block_text(el.data)))
 
 
 def element_zpl(el) -> List[str]:
-    fo = f"^FO{max(0, el.x)},{max(0, el.y)}"
+    fo = field_origin(el)
+    o = orientation(el)
     if isinstance(el, TextElement):
-        cmd = f"{fo}^A0N,{el.height},{el.width or el.height}"
+        cmd = f"{fo}^A0{o},{el.height},{el.width or el.height}"
         if el.block_width:
             cmd += f"^FB{el.block_width},{max(1, el.max_lines)},0,{el.align},0"
         if el.reverse:
@@ -98,7 +125,8 @@ def element_zpl(el) -> List[str]:
         data = barcode.code128_zpl_data(el.data) or el.data.replace(">", ">0")
         own_text = el.show_text and not el.text_size
         line = "Y" if own_text else "N"
-        out = [f"^BY{el.module}{fo}^BCN,{el.height},{line},N,N,N" + field_data(data)]
+        fo = field_origin(el, (0, 0, el.size()[0], el.height))       # the bars
+        out = [f"^BY{el.module}{fo}^BC{o},{el.height},{line},N,N,N" + field_data(data)]
         if el.show_text and el.text_size:
             out.append(barcode_text_zpl(el))
         return out
@@ -112,7 +140,12 @@ def element_zpl(el) -> List[str]:
         if sym is None:
             return []
         by = f"^BY{el.module},{el.ratio:.1f}" if sym.two_width else f"^BY{el.module}"
-        return [f"{by}{fo}{sym.zpl(el)}" + field_data(sym.zpl_data(el.data, el))]
+        cmd = sym.zpl(el)
+        if el.rotation % 360 and el.can_rotate():
+            cmd = cmd.replace(f"^{sym.command}N", f"^{sym.command}{o}", 1)
+            if sym.shape in ("linear", "postal"):
+                fo = field_origin(el, (0, 0, el.size()[0], el.height))   # the bars
+        return [f"{by}{fo}{cmd}" + field_data(sym.zpl_data(el.data, el))]
     if isinstance(el, BoxElement):
         t = min(el.w, el.h) if el.filled else max(1, min(el.thickness, el.w, el.h))
         return [f"{fo}^GB{el.w},{el.h},{t},B,{el.rounding}^FS"]
@@ -149,13 +182,24 @@ def visible_zpl(el, label: Label) -> List[str]:
     return [f"^FO{x},{y}{fr}^GFA,{total},{total},{row_bytes},{data.hex().upper()}^FS"]
 
 
+def to_print(lab: Label) -> Label:
+    """The label as the printer sees it. A design turned on screen (orientation) is
+    turned back: every element moves and turns with it, and width and height swap at 90
+    and 270 degrees. lab is changed in place (it is the filled copy) and returned."""
+    if lab.orientation % 360:
+        lab.turn_design(0)
+    return lab
+
+
 def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
               copies: Optional[int] = None) -> str:
     lab = label.filled(values)
-    if any(el.x < 0 or el.y < 0 for el in lab.elements):
-        # their sizes decide what is left of them on the label
+    if lab.orientation % 360 or any(el.x < 0 or el.y < 0 or el.rotation % 360
+                                    for el in lab.elements):
+        # sizes decide what is left on the label, and where rotated fields go
         from . import render
         render.measure(lab)
+    lab = to_print(lab)
     lines = [
         "^XA",
         "^CI28",                      # field data is UTF-8

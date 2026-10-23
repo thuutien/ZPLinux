@@ -296,6 +296,8 @@ def gs1_check_digit(digits: str) -> str:
 def display_text(el) -> str:
     """The text printed under a barcode: EAN-13, EAN-8 and UPC-A show the check digit
     the printer adds."""
+    if el.symbology == "code39":
+        return f"*{el.data}*"          # the printer shows the start and stop characters
     lengths = {"ean13": 12, "ean8": 7, "upca": 11}
     n = lengths.get(el.symbology)
     if n and len(el.data) == n and el.data.isdigit():

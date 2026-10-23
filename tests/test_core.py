@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from zplinux import barcode, printing, zpl  # noqa: E402
 from zplinux.model import (BoxElement, Code128Element, ImageElement, Label, QRElement,  # noqa: E402
-                           TextElement)
+                           TextElement, rotate_rect)
 
 # 2x2 PNG: black, white / white, black
 PNG_2X2 = base64.b64decode(
@@ -99,6 +99,57 @@ class RenameTests(unittest.TestCase):
         self.assertEqual(Label.from_json(old).elements[0].text, "Hi")
         with self.assertRaises(ValueError):
             Label.from_json('{"format": "something else"}')
+
+
+class RotationTests(unittest.TestCase):
+    def test_rotate_rect(self):
+        # a 10 x 4 rect at the top-left of a 100 x 50 area
+        r = (0, 0, 10, 4)
+        self.assertEqual(rotate_rect(r, 100, 50, 90), (46, 0, 4, 10))
+        self.assertEqual(rotate_rect(r, 100, 50, 180), (90, 46, 10, 4))
+        self.assertEqual(rotate_rect(r, 100, 50, 270), (0, 90, 4, 10))
+
+    def test_bounds_swap_at_90(self):
+        el = BoxElement(w=60, h=20)
+        img = ImageElement(w=60, h=20, rotation=90)
+        self.assertEqual(el.bounds()[2:], (60, 20))
+        self.assertEqual(img.bounds()[2:], (20, 60))
+
+    def test_rotated_fields(self):
+        lab = Label(width_mm=101.6, height_mm=101.6, elements=[
+            TextElement(x=40, y=40, text="Hi", height=40, rotation=90),
+            Code128Element(x=40, y=300, data="12345678", height=60, module=2, rotation=90)])
+        out = zpl.label_zpl(lab)
+        self.assertIn("^FO40,40^A0R,40,40", out)
+        # ^FO is the corner of the bars; the text below them lies to their left at 90
+        bc = lab.filled({}).elements[1]
+        from zplinux import render
+        render.measure(Label(elements=[bc]))
+        text_space = bc.size()[1] - bc.height
+        self.assertIn(f"^FO{40 + text_space},300^BCR,60,Y", out)
+
+    def test_turning_the_design_prints_the_same(self):
+        def design():
+            return Label(width_mm=101.6, height_mm=50.8, elements=[
+                TextElement(x=30, y=20, text="Blue Mug", height=50),
+                Code128Element(x=30, y=120, data="MUG-0001", height=80, module=2),
+                QRElement(x=600, y=40, data="x", magnification=5),
+                BoxElement(x=10, y=10, w=790, h=380, thickness=4)])
+        from zplinux import render
+        upright = design()
+        for deg in (90, 180, 270):
+            turned = design()
+            render.measure(turned)
+            turned.turn_design(deg)
+            with self.subTest(orientation=deg):
+                self.assertEqual(zpl.label_zpl(turned), zpl.label_zpl(upright))
+                if deg % 180:
+                    self.assertEqual((turned.width_mm, turned.height_mm), (50.8, 101.6))
+                self.assertEqual(turned.elements[2].rotation, deg)  # the QR turns on screen
+
+    def test_orientation_is_saved(self):
+        lab = Label(orientation=90)
+        self.assertEqual(Label.from_json(lab.to_json()).orientation, 90)
 
 
 class OffLabelTests(unittest.TestCase):

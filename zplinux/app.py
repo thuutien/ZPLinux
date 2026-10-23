@@ -29,7 +29,7 @@ from . import (APP_ID, APP_NAME, __version__, printing, render, updater, zpl,  #
 from .canvas import LabelCanvas  # noqa: E402
 from .model import (DPI_CHOICES, KIND_NAMES, MM_PER_INCH, UNITS, BarcodeElement,  # noqa: E402
                     BoxElement, Code128Element, EllipseElement, Element, ImageElement, Label,
-                    QRElement, TextElement, describe, dpmm, element_from_dict, to_unit)
+                    QRElement, TextElement, describe, dpmm, element_from_dict, to_unit, turn)
 from . import symbology, zint  # noqa: E402
 from .templates import TEMPLATES  # noqa: E402
 from .widgets import CSS, PropertyForm, Toast, dim_label, icon_button  # noqa: E402
@@ -333,6 +333,7 @@ class Window(Gtk.ApplicationWindow):
         add("undo", self.undo, ["<Primary>z"])
         add("redo", self.redo, ["<Primary><Shift>z", "<Primary>y"])
         add("duplicate", self.duplicate_selected, ["<Primary>d"])
+        add("rotate", lambda: self.rotate_selected(90), ["<Primary>r"])
         add("zoom-in", lambda: self.set_zoom(self.canvas.zoom * 1.25),
             ["<Primary>plus", "<Primary>equal"])
         add("zoom-out", lambda: self.set_zoom(self.canvas.zoom / 1.25), ["<Primary>minus"])
@@ -350,7 +351,7 @@ class Window(Gtk.ApplicationWindow):
 
     EDITOR_ACTIONS = ("save", "save-as", "export-zpl", "export-png", "print", "print-csv",
                       "undo", "redo", "duplicate", "zoom-in", "zoom-out", "zoom-100", "zoom-fit",
-                      "close-tab", "next-tab", "prev-tab")
+                      "close-tab", "next-tab", "prev-tab", "rotate")
 
     def _editor_actions_enabled(self, on: bool):
         for name in self.EDITOR_ACTIONS:
@@ -1514,6 +1515,10 @@ class Window(Gtk.ApplicationWindow):
         # objects may sit partly or wholly off the label; only the part on it prints
         form.length("X", p, "x", -10 * maxw, 10 * maxw)
         form.length("Y", p, "y", -10 * maxh, 10 * maxh)
+        if el.can_rotate() and not isinstance(el, (BoxElement, EllipseElement)):
+            form.combo("Rotation", p, "rotation",
+                       [(0, "0°"), (90, "90° clockwise"), (180, "180°"),
+                        (270, "90° counterclockwise")])
         align = Gtk.Box(spacing=8, homogeneous=True)
         tips = {"left": "Align to left edge", "hcenter": "Center horizontally",
                 "right": "Align to right edge", "top": "Align to top edge",
@@ -1540,6 +1545,11 @@ class Window(Gtk.ApplicationWindow):
         arr.pack_start(order, False, False, 0)
         arr.pack_start(icon_button("edit-copy-symbolic", "Duplicate (Ctrl+D)",
                                    self.duplicate_selected, flat=False), False, False, 0)
+        if el.can_rotate():
+            arr.pack_start(icon_button("object-rotate-right-symbolic",
+                                       "Rotate 90° clockwise (Ctrl+R)",
+                                       lambda: self.rotate_selected(90), flat=False),
+                           False, False, 0)
         delete = icon_button("user-trash-symbolic", "Delete (Del)", self.delete_selected, flat=False)
         delete.get_style_context().add_class("destructive-action")
         arr.pack_end(delete, False, False, 0)
@@ -1652,6 +1662,40 @@ class Window(Gtk.ApplicationWindow):
         if "check" in opts:
             form.switch("Add check digit", p, "check")
 
+    def rotate_selected(self, step: int = 90):
+        """Turn the selected object about its centre."""
+        el = self.selected
+        if el is None:
+            return
+        if not el.can_rotate():
+            self.notify(f"{KIND_NAMES.get(el.kind, 'This code')} prints upright; it scans "
+                        "from any side.")
+            return
+        self.checkpoint()
+        bx, by, bw, bh = el.bounds()
+        turn(el, step)
+        _x, _y, nw, nh = el.bounds()
+        el.x, el.y = round(bx + (bw - nw) / 2), round(by + (bh - nh) / 2)
+        self.build_props()
+        self.element_changed(el)
+
+    def set_orientation(self, degrees: int):
+        """Turn the whole design on screen (paper and objects). The printed label stays
+        the same: printing turns it back."""
+        lab = self.label
+        delta = (degrees - lab.orientation) % 360
+        if not delta:
+            return False
+        self.checkpoint()
+        lab.turn_design(degrees)
+        self.refresh_label_panel()
+        self.build_props()
+        self.canvas.resize_to_label()
+        self.zoom_fit()
+        self.structure_changed()
+        self.update_status()
+        return False
+
     def refresh_label_panel(self):
         child = self.label_box.get_child()
         if child:
@@ -1698,6 +1742,14 @@ class Window(Gtk.ApplicationWindow):
             hspin.set_value(h / MM_PER_INCH if imperial else h)
         preset.connect("changed", on_preset)
         form.combo("Resolution", p, "dpi", [(d, f"{d} dpi") for d in DPI_CHOICES])
+        turn_view = Gtk.ComboBoxText()
+        for deg, text in ((0, "As printed"), (90, "Turned 90° clockwise"), (180, "Upside down"),
+                          (270, "Turned 90° counterclockwise")):
+            turn_view.append(str(deg), text)
+        turn_view.set_active_id(str(lab.orientation % 360))
+        turn_view.connect("changed", lambda c: GLib.idle_add(
+            self.set_orientation, int(c.get_active_id())))
+        form.widget(turn_view, "Orientation")
         self.size_info = dim_label(self._size_text())
         form.widget(self.size_info)
 
@@ -1867,6 +1919,7 @@ class Window(Gtk.ApplicationWindow):
                 item("Edit Content", lambda: self.activate_element(el))
                 sep()
             item("Duplicate", self.duplicate_selected)
+            item("Rotate 90°", lambda: self.rotate_selected(90))
             item("Delete", self.delete_selected)
             sep()
             item("Bring to Front", lambda: self.restack("top"))
@@ -2284,6 +2337,7 @@ class Window(Gtk.ApplicationWindow):
                                   ("<Primary>Page_Down <Primary>Page_Up", "Next / previous tab")]),
             editing=_shortcut_rows([("<Primary>z", "Undo"), ("<Primary><Shift>z", "Redo"),
                                     ("<Primary>d", "Duplicate"), ("Delete", "Delete"),
+                                    ("<Primary>r", "Rotate 90° clockwise"),
                                     ("Tab", "Select next element"),
                                     ("Return", "Edit the selected element's content"),
                                     ("Left Right Up Down", "Move by one dot"),

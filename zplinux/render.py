@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from typing import Dict, Optional, Tuple
 
 import cairo
@@ -399,11 +400,39 @@ DRAWERS = {
 }
 
 
-def draw_element(cr, el, label: Label) -> None:
+def _draw_upright(cr, el, label: Label) -> None:
     if isinstance(el, BarcodeElement):
         draw_barcode(cr, el, dpmm(label.dpi))
     else:
         DRAWERS[type(el)](cr, el)
+
+
+_SCRATCH = cairo.ImageSurface(cairo.FORMAT_A8, 1, 1)
+
+
+def draw_element(cr, el, label: Label) -> None:
+    """Draw an element, turned by its rotation inside its box at (x, y)."""
+    r = el.rotation % 360
+    if not r:
+        _draw_upright(cr, el, label)
+        return
+    _draw_upright(cairo.Context(_SCRATCH), el, label)      # measure it upright first
+    w0, h0 = el.size()
+    x, y = el.x, el.y
+    cr.save()
+    if r == 90:
+        cr.translate(x + h0, y)
+    elif r == 180:
+        cr.translate(x + w0, y + h0)
+    else:
+        cr.translate(x, y + w0)
+    cr.rotate(math.radians(r))
+    el.x = el.y = 0
+    try:
+        _draw_upright(cr, el, label)
+    finally:
+        el.x, el.y = x, y
+        cr.restore()
 
 
 def draw_elements(cr, label: Label) -> None:
