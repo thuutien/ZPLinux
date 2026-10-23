@@ -1482,8 +1482,9 @@ class Window(Gtk.ApplicationWindow):
                       "threshold print black.")
 
         form.section("Position")
-        form.length("X", p, "x", 0, maxw)
-        form.length("Y", p, "y", 0, maxh)
+        # objects may sit partly or wholly off the label; only the part on it prints
+        form.length("X", p, "x", -10 * maxw, 10 * maxw)
+        form.length("Y", p, "y", -10 * maxh, 10 * maxh)
         align = Gtk.Box(spacing=8, homogeneous=True)
         tips = {"left": "Align to left edge", "hcenter": "Center horizontally",
                 "right": "Align to right edge", "top": "Align to top edge",
@@ -1759,6 +1760,11 @@ class Window(Gtk.ApplicationWindow):
         if self.selected:
             _bx, _by, bw, bh = self.selected.bounds()
             parts.append(f"{KIND_NAMES[self.selected.kind]} {self.fmt(bw)} × {self.fmt(bh)}")
+            where = zpl.placement(self.selected, lab)
+            if where == "cut":
+                parts.append("partly off the label")
+            elif where == "outside":
+                parts.append("off the label, won't print")
         self.status.set_text("   ·   ".join(parts))
 
     def pointer_moved(self, x, y):
@@ -1773,6 +1779,7 @@ class Window(Gtk.ApplicationWindow):
         self.canvas.zoom = max(0.1, min(8.0, z))
         self.zoom_btn.set_label(f"{round(self.canvas.zoom * 100)}%")
         self.canvas.resize_to_label()
+        self.canvas.center_on_label()
 
     def zoom_fit(self):
         a = self.scroller.get_allocation()

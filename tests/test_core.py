@@ -92,6 +92,44 @@ class ZplTests(unittest.TestCase):
         self.assertIn("^FD2^FS", out)
 
 
+class OffLabelTests(unittest.TestCase):
+    """Objects may sit partly or wholly off the label; only what is on it prints."""
+
+    def lab(self, *els):
+        return Label(width_mm=50.8, height_mm=25.4, dpi=203, elements=list(els))   # 406 x 203
+
+    def fields(self, *els):
+        return [l for l in zpl.label_zpl(self.lab(*els)).splitlines() if l.startswith("^FO")
+                or l.startswith("^BY")]
+
+    def test_wholly_off_the_label_is_left_out(self):
+        self.assertEqual(self.fields(BoxElement(x=500, y=10, w=50, h=50)), [])
+        self.assertEqual(self.fields(BoxElement(x=-80, y=10, w=50, h=50)), [])
+        self.assertEqual(self.fields(BoxElement(x=10, y=-80, w=50, h=50)), [])
+
+    def test_past_the_right_or_bottom_edge_prints_normally(self):
+        # the printer cuts fields off at the label's edge itself
+        self.assertEqual(self.fields(BoxElement(x=380, y=180, w=50, h=50, thickness=4)),
+                         ["^FO380,180^GB50,50,4,B,0^FS"])
+
+    def test_past_the_left_edge_becomes_a_graphic_of_the_visible_part(self):
+        out = self.fields(BoxElement(x=-20, y=30, w=50, h=40, filled=True))
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0].startswith("^FO0,30^GFA,"), out[0])
+        total, _, row_bytes = out[0].split("^GFA,")[1].split(",")[:3]
+        self.assertEqual((int(row_bytes), int(total) // int(row_bytes)), (4, 40))  # 30 dots
+
+    def test_reverse_text_keeps_reversing(self):
+        out = self.fields(TextElement(x=-10, y=-5, text="HI", height=40, reverse=True))
+        self.assertTrue(out[0].startswith("^FO0,0^FR^GFA,"), out[0])
+
+    def test_placement(self):
+        lab = self.lab()
+        self.assertEqual(zpl.placement(BoxElement(x=10, y=10, w=50, h=50), lab), "inside")
+        self.assertEqual(zpl.placement(BoxElement(x=380, y=10, w=50, h=50), lab), "cut")
+        self.assertEqual(zpl.placement(BoxElement(x=-60, y=10, w=50, h=50), lab), "outside")
+
+
 class BarcodeTests(unittest.TestCase):
     def test_code128_width(self):
         widths = barcode.code128("PJJ123C")       # no digit run long enough for subset C

@@ -9,12 +9,14 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from . import render  # noqa: E402
 from .model import Element, dpmm  # noqa: E402
 
-MARGIN = 32          # screen pixels around the label
+MARGIN = 32          # screen pixels around the work area
+WORK = 160           # screen pixels of work area around the label, for objects off it
+OUTSIDE_ALPHA = 0.35  # how strongly objects off the label are drawn
 HANDLE = 6           # resize handle radius in screen pixels
 SNAP_PX = 6          # snapping distance in screen pixels
 GRID_MM = 5
@@ -36,6 +38,9 @@ class LabelCanvas(Gtk.DrawingArea):
         self.hover: Optional[Element] = None
         self.drag = None       # dict while a move/resize is in progress
         self.guides: List[Tuple[str, float]] = []   # ("v", x) / ("h", y) in dots
+        self.extents = (0.0, 0.0, 1.0, 1.0)  # work area in dots: x0, y0, x1, y1
+        self._center_pending = False
+        self.connect("size-allocate", self._on_allocate)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
                         | Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.SCROLL_MASK
                         | Gdk.EventMask.SMOOTH_SCROLL_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
@@ -55,17 +60,71 @@ class LabelCanvas(Gtk.DrawingArea):
         return self.host.label
 
     def resize_to_label(self):
-        self.set_size_request(int(self.label.width_dots * self.zoom) + 2 * MARGIN,
-                              int(self.label.height_dots * self.zoom) + 2 * MARGIN)
+        """Size the canvas for the label, the work area around it and any object
+        placed further out."""
+        lab = self.label
+        pad = WORK / self.zoom
+        x0, y0, x1, y1 = -pad, -pad, lab.width_dots + pad, lab.height_dots + pad
+        for el in lab.elements:
+            bx, by, bw, bh = el.bounds()
+            x0, y0 = min(x0, bx - pad / 4), min(y0, by - pad / 4)
+            x1, y1 = max(x1, bx + bw + pad / 4), max(y1, by + bh + pad / 4)
+        self.extents = (x0, y0, x1, y1)
+        self.set_size_request(int((x1 - x0) * self.zoom) + 2 * MARGIN,
+                              int((y1 - y0) * self.zoom) + 2 * MARGIN)
         self.queue_draw()
 
     def origin(self) -> Tuple[float, float]:
-        """Top-left of the label in widget pixels; the label is centred when it is smaller
-        than the visible area."""
+        """Where dot (0, 0), the label's top-left, is in widget pixels; the work area is
+        centred when it is smaller than the visible area."""
         a = self.get_allocation()
-        w = self.label.width_dots * self.zoom
-        h = self.label.height_dots * self.zoom
-        return max(MARGIN, (a.width - w) / 2), max(MARGIN, (a.height - h) / 2)
+        x0, y0, x1, y1 = self.extents
+        w, h = (x1 - x0) * self.zoom, (y1 - y0) * self.zoom
+        return (max(MARGIN, (a.width - w) / 2) - x0 * self.zoom,
+                max(MARGIN, (a.height - h) / 2) - y0 * self.zoom)
+
+    def _keep_still(self, old_x0: float, old_y0: float):
+        """After the work area grew left or up, scroll by as much so nothing moves."""
+        def shift():
+            sw = self.get_parent()
+            while sw is not None and not isinstance(sw, Gtk.ScrolledWindow):
+                sw = sw.get_parent()
+            if sw is not None:
+                x0, y0, _x1, _y1 = self.extents
+                for adj, d in ((sw.get_hadjustment(), old_x0 - x0),
+                               (sw.get_vadjustment(), old_y0 - y0)):
+                    if d > 0:
+                        adj.set_value(adj.get_value() + d * self.zoom)
+            return False
+        GLib.idle_add(shift)
+
+    def center_on_label(self):
+        """Scroll so the label is in the middle of the view, once the canvas has its new
+        size (or now, if the size doesn't change)."""
+        self._center_pending = True
+        GLib.timeout_add(150, self._center_if_pending)
+
+    def _on_allocate(self, _w, _a):
+        if self._center_pending:
+            GLib.idle_add(self._center_if_pending)
+
+    def _center_if_pending(self):
+        if self._center_pending:
+            self._center_pending = False
+            self._center()
+        return False
+
+    def _center(self):
+        sw = self.get_parent()
+        while sw is not None and not isinstance(sw, Gtk.ScrolledWindow):
+            sw = sw.get_parent()
+        if sw is None:
+            return
+        ox, oy = self.origin()
+        for adj, mid in ((sw.get_hadjustment(), ox + self.label.width_dots * self.zoom / 2),
+                         (sw.get_vadjustment(), oy + self.label.height_dots * self.zoom / 2)):
+            adj.set_value(max(adj.get_lower(), min(adj.get_upper() - adj.get_page_size(),
+                                                   mid - adj.get_page_size() / 2)))
 
     def to_dots(self, ex: float, ey: float) -> Tuple[float, float]:
         ox, oy = self.origin()
@@ -105,6 +164,12 @@ class LabelCanvas(Gtk.DrawingArea):
         cr.save()
         cr.scale(self.zoom, self.zoom)
         preview = lab.filled(self.host.values)
+        # Objects off the label are drawn faded (they don't print), then the label
+        # itself as it prints.
+        cr.push_group()
+        render.draw_elements(cr, preview)
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(OUTSIDE_ALPHA)
         render.draw_label(cr, preview)
         # Measured sizes come from the preview; copy them back for hit-testing.
         for src, dst in zip(preview.elements, lab.elements):
@@ -241,7 +306,6 @@ class LabelCanvas(Gtk.DrawingArea):
                 d["started"] = True
             free = bool(ev.state & Gdk.ModifierType.MOD1_MASK) or not self.snap
             self.guides = []
-            lab = self.label
             if d["mode"] == "move":
                 _bx, _by, bw, bh = el.bounds()
                 nx, ny = d["orig"][0] + dx, d["orig"][1] + dy
@@ -249,8 +313,8 @@ class LabelCanvas(Gtk.DrawingArea):
                     xs, ys = self._targets(el)
                     nx = self._snap_axis(nx, (0, bw / 2, bw), xs, "v")
                     ny = self._snap_axis(ny, (0, bh / 2, bh), ys, "h")
-                el.x = int(round(max(0, min(lab.width_dots - 1, nx))))
-                el.y = int(round(max(0, min(lab.height_dots - 1, ny))))
+                # Objects may go off the label; only the part on it prints.
+                el.x, el.y = int(round(nx)), int(round(ny))
             else:
                 ox, oy, ow, oh = d["orig"]
                 right, bottom = ox + ow + dx, oy + oh + dy
@@ -285,6 +349,11 @@ class LabelCanvas(Gtk.DrawingArea):
             self.queue_draw()
         if was_drag:
             self.host.drag_finished()
+            x0, y0, x1, y1 = self.extents
+            bx, by, bw, bh = self.host.selected.bounds() if self.host.selected else (0, 0, 0, 0)
+            if bx < x0 or by < y0 or bx + bw > x1 or by + bh > y1:
+                self.resize_to_label()      # make room for it ...
+                self._keep_still(x0, y0)    # ... without the label jumping
         return True
 
     def on_drop(self, widget, ctx, ex, ey, data, info, time):

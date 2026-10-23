@@ -125,9 +125,37 @@ def element_zpl(el) -> List[str]:
     return []
 
 
+def placement(el, label: Label) -> str:
+    """'inside', 'cut' (partly outside the label) or 'outside'."""
+    bx, by, bw, bh = el.bounds()
+    W, H = label.width_dots, label.height_dots
+    if bx >= W or by >= H or bx + bw <= 0 or by + bh <= 0:
+        return "outside"
+    if bx < 0 or by < 0 or bx + bw > W or by + bh > H:
+        return "cut"
+    return "inside"
+
+
+def visible_zpl(el, label: Label) -> List[str]:
+    """ZPL for an element hanging off the left or top edge: printers can't place a field
+    at a negative position, so send the part inside the label as a graphic."""
+    from . import render
+    bitmap = render.visible_bitmap(el, label)
+    if bitmap is None:
+        return []
+    x, y, row_bytes, rows, data = bitmap
+    total = row_bytes * rows
+    fr = "^FR" if getattr(el, "reverse", False) else ""
+    return [f"^FO{x},{y}{fr}^GFA,{total},{total},{row_bytes},{data.hex().upper()}^FS"]
+
+
 def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
               copies: Optional[int] = None) -> str:
     lab = label.filled(values)
+    if any(el.x < 0 or el.y < 0 for el in lab.elements):
+        # their sizes decide what is left of them on the label
+        from . import render
+        render.measure(lab)
     lines = [
         "^XA",
         "^CI28",                      # field data is UTF-8
@@ -138,7 +166,14 @@ def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
     if lab.darkness:
         lines.append(f"^MD{max(-30, min(30, lab.darkness))}")
     for el in lab.elements:
-        lines.extend(element_zpl(el))
+        # Only what is inside the label prints. Past the right or bottom edge the
+        # printer cuts fields off itself; past the left or top it can't place them.
+        if el.x >= lab.width_dots or el.y >= lab.height_dots:
+            continue
+        if el.x < 0 or el.y < 0:
+            lines.extend(visible_zpl(el, lab))
+        else:
+            lines.extend(element_zpl(el))
     n = copies if copies is not None else lab.copies
     if n > 1:
         lines.append(f"^PQ{n}")

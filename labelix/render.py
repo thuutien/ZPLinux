@@ -399,19 +399,63 @@ DRAWERS = {
 }
 
 
+def draw_element(cr, el, label: Label) -> None:
+    if isinstance(el, BarcodeElement):
+        draw_barcode(cr, el, dpmm(label.dpi))
+    else:
+        DRAWERS[type(el)](cr, el)
+
+
+def draw_elements(cr, label: Label) -> None:
+    """Every element, without paper and without clipping to the label."""
+    for el in label.elements:
+        draw_element(cr, el, label)
+
+
 def draw_label(cr, label: Label) -> None:
-    """Draw white paper and every element. Coordinates are dots."""
+    """Draw white paper and every element, cut off at the label's edges, as printed.
+    Coordinates are dots."""
     cr.save()
     cr.rectangle(0, 0, label.width_dots, label.height_dots)
     cr.set_source_rgb(1, 1, 1)
     cr.fill_preserve()
     cr.clip()
-    for el in label.elements:
-        if isinstance(el, BarcodeElement):
-            draw_barcode(cr, el, dpmm(label.dpi))
-        else:
-            DRAWERS[type(el)](cr, el)
+    draw_elements(cr, label)
     cr.restore()
+
+
+def measure(label: Label) -> None:
+    """Fill in the elements' measured sizes (bounds) by drawing them off screen."""
+    surf = cairo.ImageSurface(cairo.FORMAT_A8, 1, 1)
+    draw_elements(cairo.Context(surf), label)
+
+
+def visible_bitmap(el, label: Label) -> Optional[Tuple[int, int, int, int, bytes]]:
+    """The part of an element inside the label as 1-bit rows (set bit = black):
+    (x, y, bytes per row, rows, data), or None when nothing of it is inside."""
+    bx, by, bw, bh = el.bounds()
+    x0, y0 = max(0, int(bx)), max(0, int(by))
+    x1 = min(label.width_dots, int(bx + bw + 0.999))
+    y1 = min(label.height_dots, int(by + bh + 0.999))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    w, h = x1 - x0, y1 - y0
+    surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
+    cr = cairo.Context(surf)
+    cr.set_source_rgb(1, 1, 1)
+    cr.paint()
+    cr.translate(-x0, -y0)
+    draw_element(cr, el, label)
+    surf.flush()
+    data, stride = surf.get_data(), surf.get_stride()
+    row_bytes = (w + 7) // 8
+    out = bytearray(row_bytes * h)
+    for y in range(h):
+        row = y * stride
+        for x in range(w):
+            if data[row + 4 * x + 1] < 128:          # green channel; the image is grey
+                out[y * row_bytes + (x >> 3)] |= 0x80 >> (x & 7)
+    return x0, y0, row_bytes, h, bytes(out)
 
 
 def render_png(label: Label, path: str) -> None:
