@@ -57,6 +57,20 @@
     <mediatype>application/x-zplinux</mediatype>
   </provides>
   <releases>
+    <release version="0.7.0" date="2026-10-28">
+      <description>
+        <ul>
+          <li>{date}, {time} and {counter} fill in when printing</li>
+          <li>The printer is asked before printing: it warns when it is out of labels, open, set to another resolution or narrower than the label; Check Printer and Calibrate</li>
+          <li>Select several objects and move, align, rotate or delete them together</li>
+          <li>Lock objects in place</li>
+          <li>Save your own templates</li>
+          <li>Print batches from Excel and LibreOffice files</li>
+          <li>The fonts built into Zebra printers (A to H)</li>
+          <li>Grid and snapping buttons in the top bar, and grid spacing in Preferences</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.6.1" date="2026-10-23">
       <description>
         <p>Label orientation now rotates what prints: design a landscape label and print it turned onto stock that feeds the other way.</p>
