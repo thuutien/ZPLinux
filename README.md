@@ -24,7 +24,8 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 ## Features
 
 - **Start screen** with ready-made templates (shipping, product, price tag,
-  address, asset tag, blank sizes) and your recent labels
+  address, asset tag, blank sizes), **your own templates** (menu → Save as
+  Template; right-click one to delete it) and your recent labels
 - **Tabs**: open and edit several labels at once, each with its own undo
   history and zoom (Ctrl+T new, Ctrl+W close, Ctrl+PageUp/PageDown to switch)
 - **Canvas**: text, barcodes, QR codes, boxes/lines, ellipses and images

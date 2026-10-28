@@ -7,6 +7,7 @@ import csv
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,7 @@ from .widgets import CSS, PropertyForm, Toast, dim_label, icon_button  # noqa: E
 SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "zplinux", "settings.json")
 # ZPLinux was called Labelix; its settings (printers, recent files) are copied over once,
 # from a normal install or from the Labelix Flatpak.
+TEMPLATES_DIR = os.path.join(os.path.dirname(SETTINGS_FILE), "templates")
 OLD_SETTINGS_FILES = (
     os.path.join(GLib.get_user_config_dir(), "labelix", "settings.json"),
     os.path.expanduser("~/.var/app/org.labelix.Labelix/config/labelix/settings.json"),
@@ -346,6 +348,7 @@ class Window(Gtk.ApplicationWindow):
         add("open", self.open_dialog, ["<Primary>o"])
         add("save", self.save, ["<Primary>s"])
         add("save-as", self.save_as, ["<Primary><Shift>s"])
+        add("save-template", self.save_as_template)
         add("export-zpl", self.export_zpl, ["<Primary>e"])
         add("export-png", self.export_png)
         add("print", self.print_label, ["<Primary>p"])
@@ -375,7 +378,7 @@ class Window(Gtk.ApplicationWindow):
     def _set_snap(self, v):
         self.canvas.snap = v
 
-    EDITOR_ACTIONS = ("save", "save-as", "export-zpl", "export-png", "print", "print-csv",
+    EDITOR_ACTIONS = ("save", "save-as", "save-template", "export-zpl", "export-png", "print", "print-csv",
                       "undo", "redo", "duplicate", "zoom-in", "zoom-out", "zoom-100", "zoom-fit",
                       "close-tab", "next-tab", "prev-tab", "rotate", "lock")
 
@@ -433,7 +436,8 @@ class Window(Gtk.ApplicationWindow):
         self.view_box = view
 
         menu = Gio.Menu()
-        for items in ((("Save As…", "win.save-as"), ("Export ZPL…", "win.export-zpl"),
+        for items in ((("Save As…", "win.save-as"), ("Save as Template…", "win.save-template"),
+                       ("Export ZPL…", "win.export-zpl"),
                        ("Export PNG Preview…", "win.export-png")),
                       (("Print from CSV…", "win.print-csv"),
                        ("Printers…", "win.printer-settings")),
@@ -667,6 +671,16 @@ class Window(Gtk.ApplicationWindow):
         flow.add(self._custom_card())
         outer.pack_start(flow, False, False, 0)
 
+        self.user_head = Gtk.Label(label="Your templates", xalign=0)
+        self.user_head.get_style_context().add_class("sidebar-title")
+        self.user_head.set_no_show_all(True)
+        outer.pack_start(self.user_head, False, False, 6)
+        self.user_flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                                     min_children_per_line=2, max_children_per_line=5,
+                                     column_spacing=12, row_spacing=12)
+        self.user_flow.set_no_show_all(True)
+        outer.pack_start(self.user_flow, False, False, 0)
+
         self.recent_head = Gtk.Label(label="Recent", xalign=0)
         self.recent_head.get_style_context().add_class("sidebar-title")
         self.recent_head.set_no_show_all(True)
@@ -694,7 +708,8 @@ class Window(Gtk.ApplicationWindow):
         btn.connect("clicked", lambda *_: cb())
         return btn
 
-    def _template_card(self, name, size, factory) -> Gtk.Widget:
+    def _template_card(self, name, size, factory, menu=None) -> Gtk.Widget:
+        """A start-screen card; menu: (text, callback) pairs for its right-click menu."""
         lab, values = factory()
         surf = thumbnail(lab, values, 150, 100)
         area = Gtk.DrawingArea()
@@ -714,7 +729,116 @@ class Window(Gtk.ApplicationWindow):
             cr.rectangle(x + 0.5, y + 0.5, surf.get_width() - 1, surf.get_height() - 1)
             cr.stroke()
         area.connect("draw", draw)
-        return self._card(area, name, size, lambda: self.start_from(factory))
+        card = self._card(area, name, size, lambda: self.start_from(factory))
+        if menu:
+            def on_press(_w, ev):
+                if ev.button != 3:
+                    return False
+                m = Gtk.Menu()
+                for text, cb in menu:
+                    it = Gtk.MenuItem(label=text)
+                    it.connect("activate", lambda *_a, cb=cb: cb())
+                    m.append(it)
+                m.show_all()
+                m.attach_to_widget(card, None)
+                m.popup_at_pointer(ev)
+                return True
+            card.connect("button-press-event", on_press)
+        return card
+
+    # ---- your templates -----------------------------------------------------
+
+    def _refresh_user_templates(self):
+        for c in self.user_flow.get_children():
+            self.user_flow.remove(c)
+        found = []
+        if os.path.isdir(TEMPLATES_DIR):
+            for fname in sorted(os.listdir(TEMPLATES_DIR), key=str.lower):
+                if not fname.endswith(".zplinux"):
+                    continue
+                path = os.path.join(TEMPLATES_DIR, fname)
+                try:
+                    with open(path) as f:
+                        text = f.read()
+                    Label.from_json(text)
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+                found.append((fname[:-len(".zplinux")], path, text))
+        for name, path, text in found:
+            def factory(text=text):
+                return Label.from_json(text), json.loads(text).get("preview_values", {})
+            lab = Label.from_json(text)
+            if self.unit == "in":
+                size = f"{lab.width_mm / MM_PER_INCH:g} × {lab.height_mm / MM_PER_INCH:g} in"
+            else:
+                size = f"{lab.width_mm:g} × {lab.height_mm:g} mm"
+            card = self._template_card(name, size, factory,
+                                       menu=[("Delete Template",
+                                              lambda p=path, n=name: self.delete_template(p, n))])
+            card.set_tooltip_text("Right-click to delete")
+            card.show_all()
+            self.user_flow.add(card)
+        self.user_flow.set_visible(bool(found))
+        self.user_head.set_visible(bool(found))
+        for child in self.user_flow.get_children():
+            child.show()
+
+    def save_as_template(self):
+        """Keep the current label on the start screen, to start new labels from."""
+        dlg = Gtk.Dialog(title="Save as Template", transient_for=self, modal=True,
+                         use_header_bar=True)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.get_widget_for_response(Gtk.ResponseType.OK).get_style_context().add_class(
+            "suggested-action")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=16)
+        default = os.path.splitext(self.doc.name())[0]
+        entry = Gtk.Entry(text="" if default == "Untitled label" else default,
+                          placeholder_text="e.g. Sorter label", activates_default=True)
+        box.pack_start(dim_label("Your templates appear on the start screen. Starting from "
+                                 "one makes a new label; the template stays as it is."),
+                       False, False, 0)
+        box.pack_start(entry, False, False, 0)
+        dlg.get_content_area().add(box)
+        dlg.set_default_size(400, -1)
+        dlg.show_all()
+        name = None
+        while dlg.run() == Gtk.ResponseType.OK:
+            name = re.sub(r'[\\/:*?"<>|]', "-", entry.get_text().strip())
+            if not name:
+                continue
+            path = os.path.join(TEMPLATES_DIR, name + ".zplinux")
+            if os.path.exists(path) and not self.ask(
+                    f"Replace the template “{name}”?", "A template with that name exists.",
+                    "Replace"):
+                name = None
+                continue
+            break
+        else:
+            name = None
+        dlg.destroy()
+        if not name:
+            return
+        try:
+            os.makedirs(TEMPLATES_DIR, exist_ok=True)
+            with open(os.path.join(TEMPLATES_DIR, name + ".zplinux"), "w") as f:
+                f.write(self._document_json())
+        except OSError as e:
+            self.error("Could not save the template", str(e))
+            return
+        self._refresh_user_templates()
+        self.notify(f"Saved “{name}” as a template")
+
+    def delete_template(self, path, name):
+        if not self.ask(f"Delete the template “{name}”?",
+                        "Labels made from it are not affected.", "Delete"):
+            return
+        try:
+            os.remove(path)
+        except OSError as e:
+            self.error("Could not delete the template", str(e))
+            return
+        self._refresh_user_templates()
 
     def _custom_card(self) -> Gtk.Widget:
         img = Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.DIALOG)
@@ -760,6 +884,7 @@ class Window(Gtk.ApplicationWindow):
 
     def show_welcome(self):
         self._refresh_recent()
+        self._refresh_user_templates()
         self.stack.set_visible_child_name("welcome")
         for w in (self.hist_box, self.view_box, self.print_box, self.save_btn):
             w.hide()
