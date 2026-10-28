@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.thuutien.ZPLinux</id>
   <name>ZPLinux</name>
-  <summary>Design and print labels for Zebra and other ZPL printers</summary>
+  <summary>Design and print Zebra labels</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
   <developer id="io.github.thuutien">
@@ -29,6 +29,11 @@
   <launchable type="desktop-id">io.github.thuutien.ZPLinux.desktop</launchable>
   <url type="homepage">https://github.com/thuutien/ZPLinux</url>
   <url type="bugtracker">https://github.com/thuutien/ZPLinux/issues</url>
+  <url type="vcs-browser">https://github.com/thuutien/ZPLinux</url>
+  <branding>
+    <color type="primary" scheme_preference="light">#8fb7e6</color>
+    <color type="primary" scheme_preference="dark">#0f3f78</color>
+  </branding>
   <screenshots>
     <screenshot type="default">
       <caption>Editing a product label</caption>

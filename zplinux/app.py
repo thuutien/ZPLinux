@@ -311,7 +311,8 @@ class Window(Gtk.ApplicationWindow):
         else:
             self.show_welcome()
 
-        if self.settings.get("check_updates", True) and \
+        # A Flatpak gets its updates from Flatpak (Flathub doesn't allow self-updating).
+        if not FLATPAK and self.settings.get("check_updates", True) and \
                 updater.due(self.settings.get("last_update_check", 0)):
             GLib.timeout_add_seconds(3, lambda: self.check_updates(manual=False) and False)
 
@@ -447,6 +448,8 @@ class Window(Gtk.ApplicationWindow):
                        (f"About {APP_NAME}", "win.about"))):
             sec = Gio.Menu()
             for text, action in items:
+                if FLATPAK and action == "win.check-updates":
+                    continue
                 sec.append(text, action)
             menu.append_section(None, sec)
         mb = Gtk.MenuButton(menu_model=menu, use_popover=True)
@@ -2772,13 +2775,17 @@ class Window(Gtk.ApplicationWindow):
         form.hint("With the grid shown, snapping also lines things up with it. Hold Alt "
                   "while dragging to place things freely.")
         form.section("Updates")
-        form.switch("Check for updates automatically", prefs, "check_updates")
-        row = Gtk.Box(spacing=10)
-        btn = Gtk.Button(label="Check Now")
-        btn.connect("clicked", lambda *_: self.check_updates(manual=True))
-        row.pack_start(btn, False, False, 0)
-        row.pack_start(dim_label(f"You have version {__version__}."), True, True, 0)
-        form.widget(row)
+        if FLATPAK:
+            form.hint(f"You have version {__version__}. Updates come through Flatpak, "
+                      "with your software centre or flatpak update.")
+        else:
+            form.switch("Check for updates automatically", prefs, "check_updates")
+            row = Gtk.Box(spacing=10)
+            btn = Gtk.Button(label="Check Now")
+            btn.connect("clicked", lambda *_: self.check_updates(manual=True))
+            row.pack_start(btn, False, False, 0)
+            row.pack_start(dim_label(f"You have version {__version__}."), True, True, 0)
+            form.widget(row)
         dlg.get_content_area().add(form)
         dlg.show_all()
         dlg.run()

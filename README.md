@@ -97,8 +97,11 @@ from Flathub if you don't have it yet:
 flatpak install --user ./zplinux-0.6.1.flatpak
 ```
 
-The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`), CUPS
-and your home folder. To build it yourself, run `packaging/build-flatpak.sh`.
+The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`) and CUPS;
+it opens and saves files through the system file chooser, so it only sees the
+files you pick. It updates through Flatpak rather than by itself. To build it
+yourself, run `packaging/build-flatpak.sh`; `packaging/flathub/` holds the
+manifest for Flathub, which builds from a release tag.
 
 **Arch / Manjaro**: build from `packaging/arch/PKGBUILD` with `makepkg -si`.
 

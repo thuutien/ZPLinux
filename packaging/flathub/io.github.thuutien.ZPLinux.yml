@@ -1,0 +1,83 @@
+# Manifest for Flathub (https://github.com/flathub). Unlike packaging/flatpak, it
+# builds ZPLinux from a release tag; update tag and commit for each release.
+app-id: io.github.thuutien.ZPLinux
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+command: zplinux
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  # network printers (TCP 9100)
+  - --share=network
+  # USB printers (/dev/usb/lp*)
+  - --device=all
+  # CUPS raw queues
+  - --socket=cups
+  # Files are opened and saved through the file chooser portal; no folder access.
+
+modules:
+  # Only the lp and lpstat commands, which ZPLinux uses for raw CUPS queues.
+  # They talk to the host's CUPS through --socket=cups.
+  - name: cups-client
+    buildsystem: simple
+    build-commands:
+      - ./configure --prefix=/app --disable-shared --disable-gssapi --disable-dbus
+        --disable-libusb --disable-pam --with-tls=gnutls
+      - make -C cups -j${FLATPAK_BUILDER_N_JOBS} libs
+      - make -C systemv lp lpstat
+      - install -Dm755 systemv/lp /app/bin/lp
+      - install -Dm755 systemv/lpstat /app/bin/lpstat
+    sources:
+      - type: archive
+        url: https://github.com/OpenPrinting/cups/releases/download/v2.4.20/cups-2.4.20-source.tar.gz
+        sha256: ab4d9cd7f3e58060091d2b24972223d6401675f11c49b65abf4f6ef31dea22ff
+
+  # The zint command draws the preview of barcode types other than Code 128 and QR.
+  - name: zint
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DZINT_USE_QT=OFF
+      - -DZINT_USE_PNG=OFF
+      - -DZINT_UNINSTALL=OFF
+    cleanup:
+      - /include
+      - /lib/cmake
+      - /lib/pkgconfig
+      - /share
+    sources:
+      - type: archive
+        url: https://downloads.sourceforge.net/project/zint/zint/2.15.0/zint-2.15.0-src.tar.gz
+        sha256: bce37d9b86e6127cac63c8b6267ac421116d4ac086519d726eb724f5462d98c7
+
+  - name: python3-qrcode
+    buildsystem: simple
+    build-commands:
+      - pip3 install --no-deps --no-build-isolation --prefix=${FLATPAK_DEST} qrcode-8.2-py3-none-any.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl
+        sha256: 16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f
+
+  - name: zplinux
+    buildsystem: simple
+    build-commands:
+      - sh install.sh --prefix /app
+      # Flatpak exports desktop files, icons and MIME types named after the app id.
+      - mv /app/share/applications/zplinux.desktop /app/share/applications/io.github.thuutien.ZPLinux.desktop
+      - sed -i 's/^Icon=zplinux$/Icon=io.github.thuutien.ZPLinux/' /app/share/applications/io.github.thuutien.ZPLinux.desktop
+      - mv /app/share/icons/hicolor/scalable/apps/zplinux.svg /app/share/icons/hicolor/scalable/apps/io.github.thuutien.ZPLinux.svg
+      - sed 's|<icon name="zplinux"/>|<icon name="io.github.thuutien.ZPLinux"/>|' /app/share/mime/packages/zplinux.xml > /app/share/mime/packages/io.github.thuutien.ZPLinux.xml
+      - rm /app/share/mime/packages/zplinux.xml
+      - install -Dm644 data/io.github.thuutien.ZPLinux.metainfo.xml /app/share/metainfo/io.github.thuutien.ZPLinux.metainfo.xml
+    sources:
+      - type: git
+        url: https://github.com/thuutien/ZPLinux.git
+        tag: v0.7.0
+        commit: COMMIT-OF-v0.7.0
+        x-checker-data:
+          type: git
+          tag-pattern: '^v([\d.]+)$'
