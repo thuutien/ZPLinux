@@ -38,7 +38,8 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
   - Postal and legacy: Codabar, Code 11, Code 49, Industrial 2 of 5,
     Standard 2 of 5, LOGMARS, MSI, Plessey, Planet, POSTNET
 - **Smart guides**: elements snap to the label's edges and centre and to each
-  other (hold Alt to place freely); optional 5 mm grid
+  other (hold Alt to place freely); optional 5 mm grid. Turn the grid and
+  snapping on and off with the two buttons next to Undo/Redo in the top bar
 - **Work area around the label**: drag objects partly or wholly off the label
   (they show faded there). Only what is on the label prints; a part hanging off
   the left or top edge is sent as a graphic, since printers can't place fields

@@ -391,13 +391,26 @@ class Window(Gtk.ApplicationWindow):
                         False, False, 0)
         hb.pack_start(hist)
         self.hist_box = hist
+        # Grid and snapping, at hand while designing (the same toggles as Ctrl+' etc.)
+        view = Gtk.Box()
+        view.get_style_context().add_class("linked")
+        for icon, tip, action in (
+                ("zplinux-grid-symbolic", "Show grid (Ctrl+')", "win.show-grid"),
+                ("zplinux-snap-symbolic", "Snap to edges, centres and other objects "
+                                          "(hold Alt to place freely)", "win.snap")):
+            b = Gtk.ToggleButton()
+            b.add(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+            b.set_tooltip_text(tip)
+            b.set_action_name(action)
+            view.pack_start(b, False, False, 0)
+        hb.pack_start(view)
+        self.view_box = view
 
         menu = Gio.Menu()
         for items in ((("Save As…", "win.save-as"), ("Export ZPL…", "win.export-zpl"),
                        ("Export PNG Preview…", "win.export-png")),
                       (("Print from CSV…", "win.print-csv"),
                        ("Printers…", "win.printer-settings")),
-                      (("Show Grid", "win.show-grid"), ("Snap to Guides", "win.snap")),
                       (("Preferences", "win.preferences"),
                        ("Keyboard Shortcuts", "win.shortcuts"),
                        ("Check for Updates", "win.check-updates"),
@@ -665,7 +678,7 @@ class Window(Gtk.ApplicationWindow):
     def show_welcome(self):
         self._refresh_recent()
         self.stack.set_visible_child_name("welcome")
-        for w in (self.hist_box, self.print_box, self.save_btn):
+        for w in (self.hist_box, self.view_box, self.print_box, self.save_btn):
             w.hide()
         self.back_btn.set_visible(bool(self.docs))
         self.tabs.hide()
@@ -674,7 +687,7 @@ class Window(Gtk.ApplicationWindow):
 
     def show_editor(self):
         self.stack.set_visible_child_name("editor")
-        for w in (self.hist_box, self.print_box, self.save_btn):
+        for w in (self.hist_box, self.view_box, self.print_box, self.save_btn):
             w.show()
         self.back_btn.hide()
         self.tabs.show()
