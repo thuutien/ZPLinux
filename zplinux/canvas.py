@@ -19,7 +19,7 @@ WORK = 160           # screen pixels of work area around the label, for objects 
 OUTSIDE_ALPHA = 0.35  # how strongly objects off the label are drawn
 HANDLE = 6           # resize handle radius in screen pixels
 SNAP_PX = 6          # snapping distance in screen pixels
-GRID_MM = 5
+GRID_MM = 5           # default grid spacing (Preferences can change it)
 ACCENT = (0.21, 0.52, 0.89)
 GUIDE = (0.91, 0.2, 0.55)
 
@@ -35,6 +35,7 @@ class LabelCanvas(Gtk.DrawingArea):
         self.host = host
         self.zoom = 1.0
         self.show_grid = False
+        self.grid_mm = GRID_MM
         self.snap = True
         self.hover: Optional[Element] = None
         self.drag = None       # dict while a move/resize is in progress
@@ -189,7 +190,7 @@ class LabelCanvas(Gtk.DrawingArea):
         cr.restore()
 
         if self.show_grid:
-            step = GRID_MM * dpmm(lab.dpi) * self.zoom
+            step = self.grid_mm * dpmm(lab.dpi) * self.zoom
             cr.set_source_rgba(*ACCENT, 0.18)
             cr.set_line_width(1)
             x = step
@@ -284,7 +285,7 @@ class LabelCanvas(Gtk.DrawingArea):
             self.guides.append((kind, best[1]))
             return pos + best[0]
         if self.show_grid:
-            step = GRID_MM * dpmm(self.label.dpi)
+            step = self.grid_mm * dpmm(self.label.dpi)
             return round(pos / step) * step
         return pos
 

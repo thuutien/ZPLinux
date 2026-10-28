@@ -842,6 +842,7 @@ class Window(Gtk.ApplicationWindow):
         self.scroller.get_style_context().add_class("canvas-bg")
         self.canvas = LabelCanvas(self)
         self.canvas.show_grid = self.settings.get("show_grid", False)
+        self.canvas.grid_mm = float(self.settings.get("grid_mm", 5))
         self.canvas.snap = self.settings.get("snap", True)
         self.canvas.connect("scroll-event", self.on_scroll)
         self.scroller.add(self.canvas)
@@ -2544,6 +2545,7 @@ class Window(Gtk.ApplicationWindow):
         dlg.set_default_size(440, -1)
         prefs = SimpleNamespace(units=self.unit,
                                 show_grid=self.canvas.show_grid,
+                                grid_mm=float(self.canvas.grid_mm),
                                 snap=self.canvas.snap,
                                 check_updates=self.settings.get("check_updates", True))
 
@@ -2562,6 +2564,10 @@ class Window(Gtk.ApplicationWindow):
                 self.lookup_action(action).set_state(GLib.Variant.new_boolean(v))
                 self.settings[attr] = v
                 (self._set_grid if attr == "show_grid" else self._set_snap)(v)
+            elif attr == "grid_mm":
+                self.settings["grid_mm"] = v
+                self.canvas.grid_mm = v
+                self.canvas.queue_draw()
             elif attr == "check_updates":
                 self.settings["check_updates"] = v
             save_settings(self.settings)
@@ -2571,8 +2577,18 @@ class Window(Gtk.ApplicationWindow):
         form.combo("Units", prefs, "units", [("mm", "Millimetres"), ("in", "Inches"),
                                              ("dots", "Printer dots")])
         form.switch("Show grid", prefs, "show_grid")
+        if self.unit == "in":
+            spacings = [(1.27, "0.05 in"), (2.54, "0.1 in"), (3.175, "⅛ in"), (6.35, "¼ in"),
+                        (12.7, "½ in")]
+        else:
+            spacings = [(1.0, "1 mm"), (2.0, "2 mm"), (2.5, "2.5 mm"), (5.0, "5 mm"),
+                        (10.0, "10 mm")]
+        if all(abs(v - prefs.grid_mm) > 1e-6 for v, _t in spacings):
+            spacings.append((prefs.grid_mm, f"{prefs.grid_mm:g} mm"))
+        form.combo("Grid spacing", prefs, "grid_mm", spacings)
         form.switch("Snap to edges and centers", prefs, "snap")
-        form.hint("Hold Alt while dragging to place things freely.")
+        form.hint("With the grid shown, snapping also lines things up with it. Hold Alt "
+                  "while dragging to place things freely.")
         form.section("Updates")
         form.switch("Check for updates automatically", prefs, "check_updates")
         row = Gtk.Box(spacing=10)
