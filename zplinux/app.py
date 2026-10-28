@@ -220,7 +220,8 @@ class Document:
     values: dict = field(default_factory=dict)   # preview/print values for {variables}
     path: Optional[str] = None
     dirty: bool = False
-    selected: Optional[Element] = None
+    selected: Optional[Element] = None           # the main selected object
+    also: List[Element] = field(default_factory=list)   # more selected objects
     undo_stack: List[str] = field(default_factory=list)
     redo_stack: List[str] = field(default_factory=list)
     undo_key: Optional[str] = None
@@ -246,6 +247,7 @@ class Window(Gtk.ApplicationWindow):
     path = _doc_property("path")
     dirty = _doc_property("dirty")
     selected = _doc_property("selected")
+    also = _doc_property("also")
     undo_stack = _doc_property("undo_stack")
     redo_stack = _doc_property("redo_stack")
     undo_key = _doc_property("undo_key")
@@ -815,9 +817,10 @@ class Window(Gtk.ApplicationWindow):
         t = Gtk.Label(label="Layers", xalign=0)
         t.get_style_context().add_class("sidebar-title")
         inner.pack_start(t, False, False, 6)
-        self.layers = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.layers = Gtk.ListBox(selection_mode=Gtk.SelectionMode.MULTIPLE,
+                                  activate_on_single_click=False)
         self.layers.get_style_context().add_class("layers")
-        self.layers.connect("row-selected", self._on_layer_selected)
+        self.layers.connect("selected-rows-changed", self._on_layer_selected)
         placeholder = dim_label("Nothing on the label yet. Add something above, or drop an "
                                 "image onto the label.")
         placeholder.set_margin_start(6)
@@ -1197,8 +1200,11 @@ class Window(Gtk.ApplicationWindow):
         self._update_history_buttons()
 
     def _snapshot(self) -> str:
-        idx = self.label.elements.index(self.selected) if self.selected in self.label.elements else -1
-        return json.dumps({"label": self.label.to_json(), "sel": idx, "values": self.values})
+        index = {id(e): i for i, e in enumerate(self.label.elements)}
+        idx = index.get(id(self.selected), -1)
+        also = [index[id(e)] for e in self.also if id(e) in index]
+        return json.dumps({"label": self.label.to_json(), "sel": idx, "also": also,
+                           "values": self.values})
 
     def checkpoint(self, key: Optional[str] = None):
         """Call before a change. Repeated changes with the same key (typing, spinning)
@@ -1219,6 +1225,8 @@ class Window(Gtk.ApplicationWindow):
         sel = d["sel"]
         self.undo_key = None
         self.selected = self.label.elements[sel] if 0 <= sel < len(self.label.elements) else None
+        self.also = [self.label.elements[i] for i in d.get("also", [])
+                     if 0 <= i < len(self.label.elements)]
         self._shown_vars = None
         self.build_props()
         self.refresh_label_panel()
@@ -1304,72 +1312,132 @@ class Window(Gtk.ApplicationWindow):
                             w=max(4, round(w * scale)), h=max(4, round(h * scale)))
 
     def delete_selected(self):
-        el = self.selected
-        if not el:
+        sel = self.selection
+        if not sel:
             return
         self.checkpoint()
-        self.label.elements.remove(el)
+        for el in sel:
+            self.label.elements[:] = [e for e in self.label.elements if e is not el]
         self.select(None)
         self.structure_changed()
-        self.notify(f"{KIND_NAMES[el.kind]} deleted", "Undo", self.undo)
+        what = KIND_NAMES[sel[0].kind] if len(sel) == 1 else f"{len(sel)} objects"
+        self.notify(f"{what} deleted", "Undo", self.undo)
 
     def duplicate_selected(self):
-        if not self.selected:
+        sel = self.selection
+        if not sel:
             return
         self.checkpoint()
-        el = element_from_dict(self.selected.to_dict())
-        el.x += dpmm(self.label.dpi) * 2
-        el.y += dpmm(self.label.dpi) * 2
-        self.label.elements.append(el)
-        self.select(el)
+        copies = []
+        for src in sel:
+            el = element_from_dict(src.to_dict())
+            el.x += dpmm(self.label.dpi) * 2
+            el.y += dpmm(self.label.dpi) * 2
+            self.label.elements.append(el)
+            copies.append(el)
+        self.set_selection(copies)
         self.structure_changed()
 
     def restack(self, where: str):
-        el = self.selected
-        if not el:
+        sel = self.selection
+        if not sel:
             return
         els = self.label.elements
-        i = els.index(el)
-        j = {"top": len(els) - 1, "bottom": 0, "up": min(len(els) - 1, i + 1),
-             "down": max(0, i - 1)}[where]
-        if i == j:
+        chosen = [e for e in els if any(e is s for s in sel)]
+        rest = [e for e in els if not any(e is s for s in sel)]
+        if where == "top":
+            new = rest + chosen
+        elif where == "bottom":
+            new = chosen + rest
+        else:
+            new = list(els)
+            order = range(len(new) - 2, -1, -1) if where == "up" else range(1, len(new))
+            step = 1 if where == "up" else -1
+            for i in order:              # each selected object passes one other object
+                j = i + step
+                if any(new[i] is s for s in sel) and not any(new[j] is s for s in sel):
+                    new[i], new[j] = new[j], new[i]
+        if all(a is b for a, b in zip(new, els)):
             return
         self.checkpoint()
-        els.insert(j, els.pop(i))
+        els[:] = new
         self.structure_changed()
 
     def align(self, where: str):
-        el = self.selected
-        if not el:
+        """One object: to the label's edges and centre. Several: to each other (the
+        box around them)."""
+        sel = self.selection
+        if not sel:
             return
-        _x, _y, w, h = el.bounds()
-        W, H = self.label.width_dots, self.label.height_dots
+        if len(sel) == 1:
+            L, T, R, B = 0, 0, self.label.width_dots, self.label.height_dots
+        else:
+            boxes = [e.bounds() for e in sel]
+            L, T = min(b[0] for b in boxes), min(b[1] for b in boxes)
+            R, B = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
         self.checkpoint()
-        if where == "left":
-            el.x = 0
-        elif where == "hcenter":
-            el.x = max(0, round((W - w) / 2))
-        elif where == "right":
-            el.x = max(0, W - w)
-        elif where == "top":
-            el.y = 0
-        elif where == "vcenter":
-            el.y = max(0, round((H - h) / 2))
-        elif where == "bottom":
-            el.y = max(0, H - h)
-        self.element_changed(el)
+        for el in sel:
+            _x, _y, w, h = el.bounds()
+            if where == "left":
+                el.x = L
+            elif where == "hcenter":
+                el.x = round((L + R - w) / 2)
+            elif where == "right":
+                el.x = R - w
+            elif where == "top":
+                el.y = T
+            elif where == "vcenter":
+                el.y = round((T + B - h) / 2)
+            elif where == "bottom":
+                el.y = B - h
+        self.element_changed(self.selected)
 
-    def select(self, el: Optional[Element]):
-        if el is self.selected and (el is None or self.props_form is not None):
+    # ---- selection ----------------------------------------------------------
+
+    @property
+    def selection(self) -> List[Element]:
+        """Everything selected, the main object last."""
+        live = {id(e) for e in self.label.elements}
+        sel = [e for e in self.also if id(e) in live]
+        if self.selected is not None and id(self.selected) in live:
+            sel.append(self.selected)
+        return sel
+
+    def is_selected(self, el) -> bool:
+        return any(e is el for e in self.selection)
+
+    def set_selection(self, els: List[Element]):
+        """Select these objects; the last is the main one (its settings show)."""
+        els = [e for i, e in enumerate(els) if not any(e is f for f in els[:i])]
+        main = els[-1] if els else None
+        changed = (main is not self.selected or len(els) - 1 != len(self.also)
+                   or not all(any(e is a for a in self.also) for e in els[:-1]))
+        self.also = els[:-1]
+        if not changed and self.props_form is not None:
             return
-        self.selected = el
+        self.selected = main
         self.undo_key = None
         self.build_props()
-        if el is not None:
+        if main is not None:
             self.panel_stack.set_visible_child_name("element")
         self._sync_layer_selection()
         self.canvas.queue_draw()
         self.update_status()
+
+    def toggle_selected(self, el: Element):
+        """Shift-click: add an object to the selection or take it out."""
+        sel = self.selection
+        if any(e is el for e in sel):
+            self.set_selection([e for e in sel if e is not el])
+        else:
+            self.set_selection(sel + [el])
+
+    def select_all(self):
+        self.set_selection(list(self.label.elements))
+
+    def select(self, el: Optional[Element]):
+        """Select just this object (None: nothing)."""
+        self.set_selection([el] if el is not None else [])
 
     def activate_element(self, el: Element):
         """Double-click or Enter: jump to the element's main field."""
@@ -1463,16 +1531,20 @@ class Window(Gtk.ApplicationWindow):
 
     def _sync_layer_selection(self):
         self._syncing_layers = True
-        target = next((r for r in self.layers.get_children() if r.element is self.selected), None)
-        if target is not None:
-            self.layers.select_row(target)
-        else:
-            self.layers.unselect_all()
+        for row in self.layers.get_children():
+            if self.is_selected(row.element):
+                self.layers.select_row(row)
+            else:
+                self.layers.unselect_row(row)
         self._syncing_layers = False
 
-    def _on_layer_selected(self, lb, row):
-        if not self._syncing_layers:
-            self.select(row.element if row is not None else None)
+    def _on_layer_selected(self, lb):
+        """Click a layer to select it; Ctrl-click or Shift-click for several."""
+        if self._syncing_layers:
+            return
+        picked = [r.element for r in lb.get_selected_rows()]
+        keep = [e for e in self.selection if any(e is p for p in picked)]
+        self.set_selection(keep + [e for e in picked if not any(e is k for k in keep)])
 
     # ---- element panel ------------------------------------------------------
 
@@ -1495,6 +1567,18 @@ class Window(Gtk.ApplicationWindow):
         if child:
             self.props_box.remove(child)
         el = self.selected
+        if len(self.selection) > 1:
+            # several objects: what applies to all of them
+            sel = self.selection
+            form = PropertyForm(lambda attr: None, self.unit, self.label.dpi)
+            form.section(f"{len(sel)} objects selected")
+            form.hint("Shift-click an object to add it or take it out; drag on empty space "
+                      "to select a group. Align lines them up with each other.")
+            self._layout_tools(form, any(e.can_rotate() for e in sel))
+            self.props_form = form
+            self.props_box.add(form)
+            self.props_box.show_all()
+            return
         if el is None:
             self.props_form = None
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, valign=Gtk.Align.CENTER,
@@ -1609,41 +1693,7 @@ class Window(Gtk.ApplicationWindow):
             form.combo("Rotation", p, "rotation",
                        [(0, "0°"), (90, "90° clockwise"), (180, "180°"),
                         (270, "90° counterclockwise")])
-        align = Gtk.Box(spacing=8, homogeneous=True)
-        tips = {"left": "Align to left edge", "hcenter": "Center horizontally",
-                "right": "Align to right edge", "top": "Align to top edge",
-                "vcenter": "Center vertically", "bottom": "Align to bottom edge"}
-        for group in (("left", "hcenter", "right"), ("top", "vcenter", "bottom")):
-            g = Gtk.Box(homogeneous=True)
-            g.get_style_context().add_class("linked")
-            for where in group:
-                g.pack_start(icon_button(f"zplinux-align-{where}-symbolic", tips[where],
-                                         lambda w=where: self.align(w), flat=False), True, True, 0)
-            align.pack_start(g, True, True, 0)
-        form.widget(align)
-
-        form.section("Arrange")
-        arr = Gtk.Box(spacing=6)
-        order = Gtk.Box()
-        order.get_style_context().add_class("linked")
-        for icon, tip, where in (("go-top-symbolic", "Bring to front", "top"),
-                                 ("go-up-symbolic", "Bring forward", "up"),
-                                 ("go-down-symbolic", "Send backward", "down"),
-                                 ("go-bottom-symbolic", "Send to back", "bottom")):
-            order.pack_start(icon_button(icon, tip, lambda w=where: self.restack(w), flat=False),
-                             False, False, 0)
-        arr.pack_start(order, False, False, 0)
-        arr.pack_start(icon_button("edit-copy-symbolic", "Duplicate (Ctrl+D)",
-                                   self.duplicate_selected, flat=False), False, False, 0)
-        if el.can_rotate():
-            arr.pack_start(icon_button("object-rotate-right-symbolic",
-                                       "Rotate 90° clockwise (Ctrl+R)",
-                                       lambda: self.rotate_selected(90), flat=False),
-                           False, False, 0)
-        delete = icon_button("user-trash-symbolic", "Delete (Del)", self.delete_selected, flat=False)
-        delete.get_style_context().add_class("destructive-action")
-        arr.pack_end(delete, False, False, 0)
-        form.widget(arr)
+        self._layout_tools(form, el.can_rotate())
 
         self.props_form = form
         self.props_box.add(form)
@@ -1752,22 +1802,60 @@ class Window(Gtk.ApplicationWindow):
         if "check" in opts:
             form.switch("Add check digit", p, "check")
 
+    def _layout_tools(self, form, rotatable: bool):
+        """Align buttons and the Arrange row, for one object or several."""
+        align = Gtk.Box(spacing=8, homogeneous=True)
+        tips = {"left": "Align to left edge", "hcenter": "Center horizontally",
+                "right": "Align to right edge", "top": "Align to top edge",
+                "vcenter": "Center vertically", "bottom": "Align to bottom edge"}
+        for group in (("left", "hcenter", "right"), ("top", "vcenter", "bottom")):
+            g = Gtk.Box(homogeneous=True)
+            g.get_style_context().add_class("linked")
+            for where in group:
+                g.pack_start(icon_button(f"zplinux-align-{where}-symbolic", tips[where],
+                                         lambda w=where: self.align(w), flat=False), True, True, 0)
+            align.pack_start(g, True, True, 0)
+        form.widget(align)
+
+        form.section("Arrange")
+        arr = Gtk.Box(spacing=6)
+        order = Gtk.Box()
+        order.get_style_context().add_class("linked")
+        for icon, tip, where in (("go-top-symbolic", "Bring to front", "top"),
+                                 ("go-up-symbolic", "Bring forward", "up"),
+                                 ("go-down-symbolic", "Send backward", "down"),
+                                 ("go-bottom-symbolic", "Send to back", "bottom")):
+            order.pack_start(icon_button(icon, tip, lambda w=where: self.restack(w), flat=False),
+                             False, False, 0)
+        arr.pack_start(order, False, False, 0)
+        arr.pack_start(icon_button("edit-copy-symbolic", "Duplicate (Ctrl+D)",
+                                   self.duplicate_selected, flat=False), False, False, 0)
+        if rotatable:
+            arr.pack_start(icon_button("object-rotate-right-symbolic",
+                                       "Rotate 90° clockwise (Ctrl+R)",
+                                       lambda: self.rotate_selected(90), flat=False),
+                           False, False, 0)
+        delete = icon_button("user-trash-symbolic", "Delete (Del)", self.delete_selected, flat=False)
+        delete.get_style_context().add_class("destructive-action")
+        arr.pack_end(delete, False, False, 0)
+        form.widget(arr)
+
     def rotate_selected(self, step: int = 90):
-        """Turn the selected object about its centre."""
-        el = self.selected
-        if el is None:
-            return
-        if not el.can_rotate():
-            self.notify(f"{KIND_NAMES.get(el.kind, 'This code')} prints upright; it scans "
-                        "from any side.")
+        """Turn the selected objects, each about its own centre."""
+        sel = [e for e in self.selection if e.can_rotate()]
+        if not sel:
+            if self.selected is not None:
+                self.notify(f"{KIND_NAMES.get(self.selected.kind, 'This code')} prints "
+                            "upright; it scans from any side.")
             return
         self.checkpoint()
-        bx, by, bw, bh = el.bounds()
-        turn(el, step)
-        _x, _y, nw, nh = el.bounds()
-        el.x, el.y = round(bx + (bw - nw) / 2), round(by + (bh - nh) / 2)
+        for el in sel:
+            bx, by, bw, bh = el.bounds()
+            turn(el, step)
+            _x, _y, nw, nh = el.bounds()
+            el.x, el.y = round(bx + (bw - nw) / 2), round(by + (bh - nh) / 2)
         self.build_props()
-        self.element_changed(el)
+        self.element_changed(self.selected)
 
     def set_orientation(self, degrees: int):
         """How the design is turned when printed (onto label stock the other way round).
@@ -1953,7 +2041,9 @@ class Window(Gtk.ApplicationWindow):
         parts = [f"{self.fmt(lab.width_dots)} × {self.fmt(lab.height_dots)} {u} · {lab.dpi} dpi"]
         if self._cursor:
             parts.append(f"Pointer {self.fmt(self._cursor[0])}, {self.fmt(self._cursor[1])}")
-        if self.selected:
+        if len(self.selection) > 1:
+            parts.append(f"{len(self.selection)} objects selected")
+        elif self.selected:
             _bx, _by, bw, bh = self.selected.bounds()
             parts.append(f"{KIND_NAMES[self.selected.kind]} {self.fmt(bw)} × {self.fmt(bh)}")
             where = zpl.placement(self.selected, lab)
@@ -2049,11 +2139,14 @@ class Window(Gtk.ApplicationWindow):
             return False
         key = Gdk.keyval_name(ev.keyval) or ""
         # Leave typing keys alone while an input field has focus; Escape returns to the canvas.
-        if isinstance(self.get_focus(), (Gtk.Entry, Gtk.TextView)):
+        if isinstance(self.get_focus(), (Gtk.Entry, Gtk.TextView, Gtk.SpinButton)):
             if key == "Escape":
                 self.canvas.grab_focus()
                 return True
             return False
+        if ev.state & Gdk.ModifierType.CONTROL_MASK and key.lower() == "a":
+            self.select_all()
+            return True
         if ev.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
             return False
         shift = bool(ev.state & Gdk.ModifierType.SHIFT_MASK)
@@ -2077,8 +2170,9 @@ class Window(Gtk.ApplicationWindow):
             step = dpmm(self.label.dpi) if shift else 1
             dx, dy = moves[key]
             self.checkpoint("nudge")
-            self.selected.x = max(0, self.selected.x + dx * step)
-            self.selected.y = max(0, self.selected.y + dy * step)
+            for el in self.selection:
+                el.x += dx * step
+                el.y += dy * step
             self.element_changed(self.selected)
             return True
         return False
@@ -2456,6 +2550,7 @@ class Window(Gtk.ApplicationWindow):
             editing=_shortcut_rows([("<Primary>z", "Undo"), ("<Primary><Shift>z", "Redo"),
                                     ("<Primary>d", "Duplicate"), ("Delete", "Delete"),
                                     ("<Primary>r", "Rotate 90° clockwise"),
+                                    ("<Primary>a", "Select everything"),
                                     ("Tab", "Select next element"),
                                     ("Return", "Edit the selected element's content"),
                                     ("Left Right Up Down", "Move by one dot"),

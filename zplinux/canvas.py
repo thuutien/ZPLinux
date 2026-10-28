@@ -12,7 +12,7 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from . import render  # noqa: E402
-from .model import Element, dpmm  # noqa: E402
+from .model import BoxElement, Element, EllipseElement, dpmm  # noqa: E402
 
 MARGIN = 32          # screen pixels around the work area
 WORK = 160           # screen pixels of work area around the label, for objects off it
@@ -25,8 +25,9 @@ GUIDE = (0.91, 0.2, 0.55)
 
 
 class LabelCanvas(Gtk.DrawingArea):
-    """`host` is the window; the canvas reads host.label / host.values / host.selected and
-    calls host.select(), host.checkpoint(), host.element_changed(), host.context_menu(),
+    """`host` is the window; the canvas reads host.label / host.values / host.selected /
+    host.selection and calls host.select(), host.set_selection(), host.toggle_selected(),
+    host.checkpoint(), host.element_changed(), host.context_menu(),
     host.activate_element(), host.drop_files() and host.pointer_moved()."""
 
     def __init__(self, host):
@@ -134,13 +135,20 @@ class LabelCanvas(Gtk.DrawingArea):
         pad = 4 / self.zoom
         for el in reversed(self.label.elements):
             bx, by, bw, bh = el.bounds()
-            if bx - pad <= x <= bx + bw + pad and by - pad <= y <= by + bh + pad:
-                return el
+            if not (bx - pad <= x <= bx + bw + pad and by - pad <= y <= by + bh + pad):
+                continue
+            if isinstance(el, (BoxElement, EllipseElement)) and not el.filled:
+                # an outline: only its edge, so things inside a frame can be picked
+                # and a selection box can start inside it
+                edge = el.thickness + pad
+                if bx + edge < x < bx + bw - edge and by + edge < y < by + bh - edge:
+                    continue
+            return el
         return None
 
     def on_handle(self, ex: float, ey: float) -> bool:
         el = self.host.selected
-        if not el:
+        if not el or len(self.host.selection) != 1:
             return False
         x, y, w, h = el.bounds()
         ox, oy = self.origin()
@@ -207,7 +215,7 @@ class LabelCanvas(Gtk.DrawingArea):
                     cr.line_to(w + MARGIN / 2, p)
             cr.stroke()
 
-        if self.hover is not None and self.hover is not self.host.selected \
+        if self.hover is not None and not self.host.is_selected(self.hover) \
                 and self.hover in lab.elements and not self.drag:
             x, y, bw, bh = (v * self.zoom for v in self.hover.bounds())
             cr.set_source_rgba(*ACCENT, 0.5)
@@ -215,21 +223,38 @@ class LabelCanvas(Gtk.DrawingArea):
             cr.rectangle(int(x) - 1.5, int(y) - 1.5, int(bw) + 3, int(bh) + 3)
             cr.stroke()
 
-        sel = self.host.selected
-        if sel is not None and sel in lab.elements:
-            x, y, bw, bh = (v * self.zoom for v in sel.bounds())
+        selection = self.host.selection
+        for el in selection:
+            x, y, bw, bh = (v * self.zoom for v in el.bounds())
             cr.set_source_rgba(*ACCENT, 1)
             cr.set_line_width(1.5)
             cr.rectangle(int(x) - 2, int(y) - 2, int(bw) + 4, int(bh) + 4)
             cr.stroke()
+        if len(selection) == 1:          # resizing is for one object at a time
             import math
+            x, y, bw, bh = (v * self.zoom for v in selection[0].bounds())
             cr.arc(x + bw + 2, y + bh + 2, HANDLE, 0, 2 * math.pi)
             cr.set_source_rgb(1, 1, 1)
             cr.fill_preserve()
             cr.set_source_rgb(*ACCENT)
             cr.set_line_width(2)
             cr.stroke()
+
+        if self.drag and self.drag["mode"] == "band" and self.drag["started"]:
+            x0, y0, x1, y1 = self._band()
+            cr.rectangle(x0 * self.zoom, y0 * self.zoom, (x1 - x0) * self.zoom,
+                         (y1 - y0) * self.zoom)
+            cr.set_source_rgba(*ACCENT, 0.12)
+            cr.fill_preserve()
+            cr.set_source_rgba(*ACCENT, 0.9)
+            cr.set_line_width(1)
+            cr.stroke()
         return False
+
+    def _band(self):
+        d = self.drag
+        return (min(d["x"], d["cx"]), min(d["y"], d["cy"]),
+                max(d["x"], d["cx"]), max(d["y"], d["cy"]))
 
     # ---- snapping -----------------------------------------------------------
 
@@ -238,7 +263,7 @@ class LabelCanvas(Gtk.DrawingArea):
         xs = [0, lab.width_dots / 2, lab.width_dots]
         ys = [0, lab.height_dots / 2, lab.height_dots]
         for el in lab.elements:
-            if el is moving:
+            if el is moving or self.host.is_selected(el):
                 continue
             bx, by, bw, bh = el.bounds()
             xs += [bx, bx + bw / 2, bx + bw]
@@ -275,7 +300,7 @@ class LabelCanvas(Gtk.DrawingArea):
             return False
         if ev.button == 3:
             el = self.hit(x, y)
-            if el is not self.host.selected:
+            if el is None or not self.host.is_selected(el):
                 self.host.select(el)
             self.host.context_menu(ev, el)
             return True
@@ -286,16 +311,38 @@ class LabelCanvas(Gtk.DrawingArea):
                          "started": False}
             return True
         el = self.hit(x, y)
-        if el is not self.host.selected:
+        adding = bool(ev.state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.CONTROL_MASK))
+        if el is None:
+            # drag on empty space: select what ends up inside the box (with Shift: add it)
+            self.drag = {"mode": "band", "x": x, "y": y, "cx": x, "cy": y, "started": False,
+                         "keep": self.host.selection if adding else []}
+            if not adding:
+                self.host.select(None)
+            return True
+        if adding:
+            self.host.toggle_selected(el)
+            return True
+        if not self.host.is_selected(el):
             self.host.select(el)
-        if el:
-            self.drag = {"mode": "move", "x": x, "y": y, "orig": (el.x, el.y), "started": False}
+        elif el is not self.host.selected:
+            # make the grabbed object the main one, keeping the others
+            self.host.set_selection([e for e in self.host.selection if e is not el] + [el])
+        self.drag = {"mode": "move", "x": x, "y": y, "orig": (el.x, el.y), "started": False,
+                     "group": [(e, e.x, e.y) for e in self.host.selection if e is not el]}
         return True
 
     def on_motion(self, widget, ev):
         x, y = self.to_dots(ev.x, ev.y)
         self.host.pointer_moved(x, y)
         el = self.host.selected
+        if self.drag and self.drag["mode"] == "band":
+            d = self.drag
+            d["cx"], d["cy"] = x, y
+            if not d["started"] and (abs(x - d["x"]) + abs(y - d["y"])) * self.zoom < 4:
+                return True
+            d["started"] = True
+            self.queue_draw()
+            return True
         if self.drag and el:
             d = self.drag
             dx, dy = x - d["x"], y - d["y"]
@@ -315,6 +362,10 @@ class LabelCanvas(Gtk.DrawingArea):
                     ny = self._snap_axis(ny, (0, bh / 2, bh), ys, "h")
                 # Objects may go off the label; only the part on it prints.
                 el.x, el.y = int(round(nx)), int(round(ny))
+                # the rest of the selection moves as much as the grabbed object did
+                ddx, ddy = el.x - d["orig"][0], el.y - d["orig"][1]
+                for other, ox, oy in d.get("group", ()):
+                    other.x, other.y = ox + ddx, oy + ddy
             else:
                 ox, oy, ow, oh = d["orig"]
                 right, bottom = ox + ow + dx, oy + oh + dy
@@ -342,6 +393,17 @@ class LabelCanvas(Gtk.DrawingArea):
         self.host.pointer_moved(None, None)
 
     def on_release(self, widget, ev):
+        if self.drag and self.drag["mode"] == "band":
+            d = self.drag
+            x0, y0, x1, y1 = self._band()
+            self.drag = None
+            if d["started"]:
+                touched = [e for e in self.label.elements
+                           if self._inside(e.bounds(), x0, y0, x1, y1)]
+                self.host.set_selection(d["keep"] + [e for e in touched
+                                                     if not any(e is k for k in d["keep"])])
+            self.queue_draw()
+            return True
         was_drag = self.drag and self.drag["started"]
         self.drag = None
         if self.guides:
@@ -355,6 +417,12 @@ class LabelCanvas(Gtk.DrawingArea):
                 self.resize_to_label()      # make room for it ...
                 self._keep_still(x0, y0)    # ... without the label jumping
         return True
+
+    @staticmethod
+    def _inside(box, x0, y0, x1, y1) -> bool:
+        """A selection box picks the objects wholly inside it."""
+        bx, by, bw, bh = box
+        return bx >= x0 and by >= y0 and bx + bw <= x1 and by + bh <= y1
 
     def on_drop(self, widget, ctx, ex, ey, data, info, time):
         paths = []

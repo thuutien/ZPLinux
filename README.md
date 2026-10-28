@@ -45,6 +45,9 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
   the left or top edge is sent as a graphic, since printers can't place fields
   there
 - **Layers list** to pick overlapping elements, plus align and arrange buttons
+- **Select several objects**: Shift-click, drag a box on empty space, or Ctrl+A;
+  then move, nudge, align (to each other), rotate, duplicate or delete them
+  together
 - **Rotation**: turn text, barcodes and images by 90° steps (Ctrl+R, or the
   Rotation setting); boxes and ellipses swap width and height. QR codes and
   MaxiCode print upright, as printers draw them
@@ -56,8 +59,15 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 - Live ZPL view with copy and export
 - **Variables**: type `{name}` in any text, barcode or QR field, fill it in on
   the Label tab, or **print a batch from a CSV file** whose column headers match
+- **Date, time and counter**: `{date}`, `{time}` and `{counter}` fill in when the
+  label prints (formats, start, step and zero padding on the Label tab); the
+  counter goes up for every label, copies and CSV batches included
 - Print over the network (TCP 9100), straight to a USB printer (`/dev/usb/lp0`),
-  through a raw CUPS queue, or to a `.zpl` file, with a connection test
+  through a raw CUPS queue, or to a `.zpl` file
+- **Printer checks**: before printing to a network or USB printer, ZPLinux asks
+  it for its model and status and warns when it is out of labels, open, set to a
+  different resolution, or narrower than the label. **Check Printer** shows the
+  model and status; **Calibrate Label Stock** measures new labels
 - **Import ZPL**: open `.prn` / `.zpl` files, such as ZebraDesigner's "print to
   file" output, as editable labels
 - Drop images, `.zplinux` or ZPL files onto the window
