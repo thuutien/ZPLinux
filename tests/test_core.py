@@ -101,6 +101,32 @@ class RenameTests(unittest.TestCase):
             Label.from_json('{"format": "something else"}')
 
 
+class PrinterFontTests(unittest.TestCase):
+    def test_sizes_round_to_whole_steps(self):
+        # measured on Labelary: font D's cell is 18 x 10; 27 x 15 prints at 2x, 54 x 10 at 3x 1x
+        self.assertEqual(TextElement(font="D", height=27, width=15).font_size(), (36, 20))
+        self.assertEqual(TextElement(font="D", height=54, width=10).font_size(), (54, 10))
+        self.assertEqual(TextElement(font="D", height=8, width=4).font_size(), (18, 10))
+        self.assertEqual(TextElement(font="D", height=40).font_size(), (36, 20))
+
+    def test_zpl_uses_exact_multiples(self):
+        out = zpl.label_zpl(Label(elements=[TextElement(x=20, y=20, text="Hi", font="E",
+                                                        height=60, rotation=90)]))
+        self.assertIn("^AER,56,30^FH_^FDHi^FS", out)
+
+    def test_preview_width_matches_the_printer(self):
+        # ten capital H in font D at 1x: 9 advances of 12 dots plus one 9-dot H on Labelary
+        from zplinux import render
+        lab = Label(elements=[TextElement(text="H" * 10, font="D", height=18)])
+        render.measure(lab)
+        self.assertEqual(lab.elements[0].measured_w, 9 * 12 + 10)
+        self.assertEqual(lab.elements[0].measured_h, 18)
+
+    def test_font_is_saved(self):
+        lab = Label(elements=[TextElement(font="B")])
+        self.assertEqual(Label.from_json(lab.to_json()).elements[0].font, "B")
+
+
 class AutoFieldTests(unittest.TestCase):
     def lab(self, text, **kw):
         return Label(elements=[TextElement(text=text)], **kw)

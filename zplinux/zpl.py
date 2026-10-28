@@ -111,7 +111,8 @@ def element_zpl(el) -> List[str]:
     fo = field_origin(el)
     o = orientation(el)
     if isinstance(el, TextElement):
-        cmd = f"{fo}^A0{o},{el.height},{el.width or el.height}"
+        h, w = el.font_size()
+        cmd = f"{fo}^A{el.font if el.bitmap_font() else '0'}{o},{h},{w}"
         if el.block_width:
             cmd += f"^FB{el.block_width},{max(1, el.max_lines)},0,{el.align},0"
         if el.reverse:

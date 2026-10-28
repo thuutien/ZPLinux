@@ -188,10 +188,11 @@ class DetailTests(unittest.TestCase):
                              "^FO10,100^BTN,2,3,40,4,8^FDABC^FS"
                              "^FO10,200^GE100,50,2^FS^FO300,10^GD50,50,2^FS^XZ")
         text = " ".join(r.warnings)
-        for word in ("font D", "TLC39", "Diagonal"):
+        for word in ("TLC39", "Diagonal"):
             self.assertIn(word, text)
         self.assertEqual(kinds(r.label), [TextElement, Code128Element, EllipseElement])
         self.assertEqual(r.label.elements[0].rotation, 90)          # ^ADR
+        self.assertEqual(r.label.elements[0].font, "D")             # printer font kept
 
     def test_barcode_types_come_in_as_themselves(self):
         r = zpl_import.parse("^XA^BY3,2.5^FO10,100^B3N,Y,50,N,N^FDABC^FS"

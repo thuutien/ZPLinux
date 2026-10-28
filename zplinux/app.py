@@ -29,8 +29,8 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 from . import (APP_ID, APP_NAME, __version__, printing, render, updater, zpl,  # noqa: E402
                zpl_import)
 from .canvas import LabelCanvas  # noqa: E402
-from .model import (DATE_FORMATS, DPI_CHOICES, KIND_NAMES, MM_PER_INCH,  # noqa: E402
-                    TIME_FORMATS, UNITS, BarcodeElement,
+from .model import (BITMAP_FONTS, DATE_FORMATS, DPI_CHOICES, KIND_NAMES,  # noqa: E402
+                    MM_PER_INCH, TIME_FORMATS, UNITS, BarcodeElement, magnification,
                     BoxElement, Code128Element, EllipseElement, Element, ImageElement, Label,
                     QRElement, TextElement, describe, dpmm, element_from_dict, to_unit, turn)
 from . import datafile, symbology, zint  # noqa: E402
@@ -1766,9 +1766,7 @@ class Window(Gtk.ApplicationWindow):
             form.textarea(None, p, "text")
             form.hint(VARIABLES_HINT)
             form.section("Font")
-            form.length("Size", p, "height", 10, 2000)
-            form.length("Character width", p, "width", 0, 2000)
-            form.hint("Character width 0 keeps normal proportions.")
+            self._font_rows(form, el, p)
             form.switch("White on black", p, "reverse")
             form.section("Text box")
             wrap = SimpleNamespace(on=bool(el.block_width))
@@ -1866,6 +1864,64 @@ class Window(Gtk.ApplicationWindow):
         self.props_box.show_all()
 
     # ---- label panel --------------------------------------------------------
+
+    # ---- text fonts ---------------------------------------------------------
+
+    def _font_rows(self, form, el, p):
+        """Font list; font 0 takes any size, the printer fonts A-H whole steps."""
+        fonts = [("0", "0 – scalable (CG Triumvirate)")] + [
+            (k, f"{bf.name} – {bf.cell_h} × {bf.cell_w} dots" + (", capitals" if bf.capitals
+                                                                 else ""))
+            for k, bf in BITMAP_FONTS.items()]
+        combo = Gtk.ComboBoxText()
+        for key, text in fonts:
+            combo.append(key, text)
+        combo.set_active_id(el.font if el.font in BITMAP_FONTS else "0")
+
+        def changed(c):
+            key = c.get_active_id()
+            if key is None or key == el.font:
+                return
+            h, _w = el.font_size()
+            self.checkpoint()
+            el.font = key
+            bf = el.bitmap_font()
+            if bf:          # snap to whole steps, keeping about the same size
+                el.height = bf.cell_h * magnification(h, bf.cell_h)
+                el.width = 0
+            self.mark_dirty()
+            GLib.idle_add(self.build_props)
+        combo.connect("changed", changed)
+        form.widget(combo, "Font")
+        bf = el.bitmap_font()
+        if bf is None:
+            form.length("Size", p, "height", 10, 2000)
+            form.length("Character width", p, "width", 0, 2000)
+            form.hint("Character width 0 keeps normal proportions.")
+            return
+        h, w = el.font_size()
+        steps = SimpleNamespace(tall=h // bf.cell_h, wide=w // bf.cell_w)
+
+        def step_changed(attr):
+            if attr == "tall":
+                p.height = bf.cell_h * steps.tall
+            else:
+                p.width = bf.cell_w * steps.wide
+            size_note.set_text(note())
+        normal = form.on_change
+        form.on_change = step_changed
+        form.spin("Height (× cell)", steps, "tall", 1, 10)
+        form.spin("Width (× cell)", steps, "wide", 1, 10)
+        form.on_change = normal
+
+        def note():
+            hh, ww = el.font_size()
+            d = dpmm(self.label.dpi)
+            pitch = (ww + bf.gap * ww // bf.cell_w) / d
+            return (f"Characters are {hh / d:.1f} mm tall and {pitch:.1f} mm apart. A font "
+                    "built into the printer: it prints exactly the size shown.")
+        size_note = dim_label(note())
+        form.widget(size_note)
 
     # ---- barcode types ------------------------------------------------------
 

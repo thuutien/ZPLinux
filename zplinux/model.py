@@ -101,6 +101,38 @@ class Element:
         return []
 
 
+@dataclass(frozen=True)
+class BitmapFont:
+    """One of the fonts built into Zebra printers (203 dpi), measured on Labelary."""
+    name: str
+    cell_h: int                # character cell at 1x, in dots
+    cell_w: int
+    gap: int                   # space between characters
+    cap_h: int                 # how tall a capital H is drawn, and where in the cell
+    ink_w: int
+    x_off: int = 0
+    y_off: int = 0
+    capitals: bool = False     # lower case prints as capitals
+    bold: bool = False
+
+
+BITMAP_FONTS = {
+    "A": BitmapFont("A", 9, 5, 1, 7, 5),
+    "B": BitmapFont("B", 11, 7, 2, 11, 7, capitals=True, bold=True),
+    "C": BitmapFont("C", 18, 10, 2, 14, 9),
+    "D": BitmapFont("D", 18, 10, 2, 14, 9),
+    "E": BitmapFont("E (OCR-B)", 28, 15, 5, 20, 12, 1, 3),
+    "F": BitmapFont("F", 26, 13, 3, 21, 13),
+    "G": BitmapFont("G", 60, 40, 8, 48, 31, 4, 0),
+    "H": BitmapFont("H (OCR-A)", 21, 13, 6, 21, 13, capitals=True),
+}
+
+
+def magnification(size: int, cell: int) -> int:
+    """Printers draw built-in fonts at whole multiples of the cell, rounding halves up."""
+    return max(1, min(10, int(size / cell + 0.5)))
+
+
 @dataclass
 class TextElement(Element):
     kind = "text"
@@ -111,6 +143,7 @@ class TextElement(Element):
     max_lines: int = 1
     align: str = "L"          # L, C, R, J (only used with a text block)
     reverse: bool = False     # white on black (^FR)
+    font: str = "0"           # 0 (scalable) or a printer font A-H
     # Filled in by the renderer so hit-testing matches what is drawn.
     measured_w: int = field(default=0, compare=False)
     measured_h: int = field(default=0, compare=False)
@@ -128,6 +161,19 @@ class TextElement(Element):
 
     def text_fields(self):
         return ["text"]
+
+    def bitmap_font(self) -> Optional[BitmapFont]:
+        return BITMAP_FONTS.get(self.font)
+
+    def font_size(self) -> tuple:
+        """(height, width) in dots as printed: for printer fonts, whole multiples of the
+        cell; a width of 0 keeps the font's proportions."""
+        bf = self.bitmap_font()
+        if bf is None:
+            return self.height, self.width or self.height
+        mh = magnification(self.height, bf.cell_h)
+        mw = magnification(self.width, bf.cell_w) if self.width else mh
+        return bf.cell_h * mh, bf.cell_w * mw
 
 
 @dataclass

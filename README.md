@@ -49,6 +49,9 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 - **Select several objects**: Shift-click, drag a box on empty space, or Ctrl+A;
   then move, nudge, align (to each other), rotate, duplicate or delete them
   together
+- **Printer fonts**: besides the scalable font 0, text can use the fonts built into
+  Zebra printers (A–H, including OCR-A and OCR-B). They come in whole-step sizes,
+  and the preview spaces, wraps and centres them exactly as the printer does
 - **Rotation**: turn text, barcodes and images by 90° steps (Ctrl+R, or the
   Rotation setting); boxes and ellipses swap width and height. QR codes and
   MaxiCode print upright, as printers draw them
