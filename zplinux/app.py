@@ -51,6 +51,9 @@ FAKE_PRINTER_CMD = (f"flatpak run --command=zplinux-fake-printer {APP_ID} --rend
                     else "zplinux-fake-printer --render" if INSTALLED
                     else "python3 tools/fake_printer.py --render")
 MAX_RECENT = 8
+# Shown under every text and barcode field that can hold {variables}.
+VARIABLES_HINT = ("Variables: {date}, {time} and {counter} fill in when printing. Any other "
+                  "name, like {name}, is yours to fill in on the Label tab or from a CSV file.")
 LABEL_EXTENSIONS = (".zplinux", ".labelix", ".json")   # .labelix: from before the rename
 ZPL_EXTENSIONS = (".zpl", ".prn")    # ZebraDesigner "print to file" writes .prn
 PRINTER_ICONS = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
@@ -1612,7 +1615,7 @@ class Window(Gtk.ApplicationWindow):
         if isinstance(el, TextElement):
             form.section("Text")
             form.textarea(None, p, "text")
-            form.hint("Type {name} to fill in a value at print time.")
+            form.hint(VARIABLES_HINT)
             form.section("Font")
             form.length("Size", p, "height", 10, 2000)
             form.length("Character width", p, "width", 0, 2000)
@@ -1645,6 +1648,7 @@ class Window(Gtk.ApplicationWindow):
             self._barcode_type_row(form, el)
             form.entry(None, p, "data", "e.g. ABC-123 or {sku}")
             form.hint("Code 128: letters, digits and symbols (printable ASCII).")
+            form.hint(VARIABLES_HINT)
             form.section("Size")
             form.length("Bar height", p, "height", 10, maxh)
             form.spin("Narrow bar (dots)", p, "module", 1, 10)
@@ -1657,6 +1661,7 @@ class Window(Gtk.ApplicationWindow):
             form.section("QR code")
             self._barcode_type_row(form, el)
             form.entry(None, p, "data", "Text, a link, or {variable}")
+            form.hint(VARIABLES_HINT)
             form.section("Size")
             form.spin("Module size (dots)", p, "magnification", 1, 10)
             form.combo("Error correction", p, "error_correction",
@@ -1776,6 +1781,7 @@ class Window(Gtk.ApplicationWindow):
             form.hint(f"Unknown barcode type '{el.symbology}'.")
             return
         form.hint(spec.hint)
+        form.hint(VARIABLES_HINT)
         if not zint.available():
             form.hint("Install zint to see this barcode in the preview; it prints without it.")
         opts = spec.options
