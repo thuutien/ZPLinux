@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import datetime
 import json
 import re
 from dataclasses import asdict, dataclass, field, fields
@@ -64,6 +65,7 @@ class Element:
     x: int = 20               # top-left of the (rotated) element
     y: int = 20
     rotation: int = 0         # clockwise: 0, 90, 180 or 270
+    locked: bool = False      # can't be clicked, dragged or resized on the canvas
 
     def bounds(self) -> tuple:
         """(x, y, w, h) in dots, used for selection and hit-testing: the rotated box."""
@@ -99,6 +101,38 @@ class Element:
         return []
 
 
+@dataclass(frozen=True)
+class BitmapFont:
+    """One of the fonts built into Zebra printers (203 dpi), measured on Labelary."""
+    name: str
+    cell_h: int                # character cell at 1x, in dots
+    cell_w: int
+    gap: int                   # space between characters
+    cap_h: int                 # how tall a capital H is drawn, and where in the cell
+    ink_w: int
+    x_off: int = 0
+    y_off: int = 0
+    capitals: bool = False     # lower case prints as capitals
+    bold: bool = False
+
+
+BITMAP_FONTS = {
+    "A": BitmapFont("A", 9, 5, 1, 7, 5),
+    "B": BitmapFont("B", 11, 7, 2, 11, 7, capitals=True, bold=True),
+    "C": BitmapFont("C", 18, 10, 2, 14, 9),
+    "D": BitmapFont("D", 18, 10, 2, 14, 9),
+    "E": BitmapFont("E (OCR-B)", 28, 15, 5, 20, 12, 1, 3),
+    "F": BitmapFont("F", 26, 13, 3, 21, 13),
+    "G": BitmapFont("G", 60, 40, 8, 48, 31, 4, 0),
+    "H": BitmapFont("H (OCR-A)", 21, 13, 6, 21, 13, capitals=True),
+}
+
+
+def magnification(size: int, cell: int) -> int:
+    """Printers draw built-in fonts at whole multiples of the cell, rounding halves up."""
+    return max(1, min(10, int(size / cell + 0.5)))
+
+
 @dataclass
 class TextElement(Element):
     kind = "text"
@@ -109,6 +143,7 @@ class TextElement(Element):
     max_lines: int = 1
     align: str = "L"          # L, C, R, J (only used with a text block)
     reverse: bool = False     # white on black (^FR)
+    font: str = "0"           # 0 (scalable) or a printer font A-H
     # Filled in by the renderer so hit-testing matches what is drawn.
     measured_w: int = field(default=0, compare=False)
     measured_h: int = field(default=0, compare=False)
@@ -126,6 +161,19 @@ class TextElement(Element):
 
     def text_fields(self):
         return ["text"]
+
+    def bitmap_font(self) -> Optional[BitmapFont]:
+        return BITMAP_FONTS.get(self.font)
+
+    def font_size(self) -> tuple:
+        """(height, width) in dots as printed: for printer fonts, whole multiples of the
+        cell; a width of 0 keeps the font's proportions."""
+        bf = self.bitmap_font()
+        if bf is None:
+            return self.height, self.width or self.height
+        mh = magnification(self.height, bf.cell_h)
+        mw = magnification(self.width, bf.cell_w) if self.width else mh
+        return bf.cell_h * mh, bf.cell_w * mw
 
 
 @dataclass
@@ -309,6 +357,15 @@ def element_from_dict(d: dict) -> Element:
     return cls(**{k: v for k, v in d.items() if k in names})
 
 
+# Fields filled in when printing: type {date}, {time} or {counter} in any text or barcode.
+AUTO_FIELDS = ("date", "time", "counter")
+# (strftime format, how it reads)
+DATE_FORMATS = (("%d/%m/%Y", "31/12/2026"), ("%m/%d/%Y", "12/31/2026"),
+                ("%Y-%m-%d", "2026-12-31"), ("%d.%m.%Y", "31.12.2026"),
+                ("%d %b %Y", "31 Dec 2026"))
+TIME_FORMATS = (("%H:%M:%S", "23:59:59"), ("%H:%M", "23:59"), ("%I:%M %p", "11:59 PM"))
+
+
 @dataclass
 class Label:
     width_mm: float = 101.6   # 4 x 6 inch shipping label by default
@@ -321,6 +378,12 @@ class Label:
     # example a 6 x 4 in landscape design printed on 4 x 6 in labels. width_mm and
     # height_mm are the design's; the stock is the other way round at 90 and 270.
     orientation: int = 0
+    # Automatic fields
+    date_format: str = "%d/%m/%Y"
+    time_format: str = "%H:%M:%S"
+    counter_next: int = 1     # the number the next printed label gets
+    counter_step: int = 1
+    counter_digits: int = 0   # pad with zeros to this many digits; 0 = no padding
 
     @property
     def width_dots(self) -> int:
@@ -359,11 +422,26 @@ class Label:
                         seen.append(var)
         return seen
 
-    def filled(self, values: Optional[Dict[str, str]]) -> "Label":
-        """A copy with {variables} replaced. Unknown variables are left as they are."""
+    def manual_variables(self) -> List[str]:
+        """The variables the user fills in (not {date}, {time} or {counter})."""
+        return [v for v in self.variables() if v not in AUTO_FIELDS]
+
+    def uses_counter(self) -> bool:
+        return "counter" in self.variables()
+
+    def auto_values(self, offset: int = 0, now: Optional[datetime.datetime] = None) -> dict:
+        """{date}, {time} and {counter} for the label printed offset labels after the
+        next one."""
+        now = now or datetime.datetime.now()
+        n = self.counter_next + offset * self.counter_step
+        return {"date": now.strftime(self.date_format), "time": now.strftime(self.time_format),
+                "counter": str(n).zfill(self.counter_digits) if n >= 0 else str(n)}
+
+    def filled(self, values: Optional[Dict[str, str]], offset: int = 0) -> "Label":
+        """A copy with {variables} replaced, {date}, {time} and {counter} included (the
+        counter offset labels on). Unknown variables are left as they are."""
         out = copy.deepcopy(self)
-        if not values:
-            return out
+        values = {**(values or {}), **self.auto_values(offset)}
         for el in out.elements:
             for name in el.text_fields():
                 setattr(el, name, VAR_RE.sub(
@@ -380,6 +458,11 @@ class Label:
             "darkness": self.darkness,
             "copies": self.copies,
             "orientation": self.orientation,
+            "date_format": self.date_format,
+            "time_format": self.time_format,
+            "counter_next": self.counter_next,
+            "counter_step": self.counter_step,
+            "counter_digits": self.counter_digits,
             "elements": [e.to_dict() for e in self.elements],
         }
         for e in d["elements"]:
@@ -399,5 +482,10 @@ class Label:
             darkness=int(d.get("darkness", 0)),
             copies=int(d.get("copies", 1)),
             orientation=int(d.get("orientation", 0)) % 360,
+            date_format=str(d.get("date_format", "%d/%m/%Y")),
+            time_format=str(d.get("time_format", "%H:%M:%S")),
+            counter_next=int(d.get("counter_next", 1)),
+            counter_step=int(d.get("counter_step", 1)),
+            counter_digits=int(d.get("counter_digits", 0)),
             elements=[element_from_dict(e) for e in d.get("elements", [])],
         )

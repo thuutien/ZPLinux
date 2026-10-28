@@ -38,7 +38,94 @@ def _font_layout(cr, text: str, height: int, bold: bool = True) -> Pango.Layout:
     return layout
 
 
+_BITMAP_FAMILY = "DejaVu Sans Mono, Liberation Mono, Monospace"
+
+
+def _wrap_cells(text: str, per_line: int) -> list:
+    """Word-wrap text to lines of at most per_line characters."""
+    lines = []
+    for para in text.split("\n"):
+        line = ""
+        for word in para.split(" "):
+            while len(word) > per_line:            # a word longer than a line breaks
+                if line:
+                    lines.append(line)
+                    line = ""
+                lines.append(word[:per_line])
+                word = word[per_line:]
+            if not line:
+                line = word
+            elif len(line) + 1 + len(word) <= per_line:
+                line += " " + word
+            else:
+                lines.append(line)
+                line = word
+        lines.append(line)
+    return lines
+
+
+def draw_bitmap_text(cr, el: TextElement) -> None:
+    """Text in a printer font: every character in its own cell, spaced as the printer
+    spaces them, so widths and line breaks match; the letters are a stand-in."""
+    bf = el.bitmap_font()
+    h, w = el.font_size()
+    mh, mw = h // bf.cell_h, w // bf.cell_w
+    advance = (bf.cell_w + bf.gap) * mw
+    text = el.text.upper() if bf.capitals else el.text
+    if el.block_width:
+        per_line = max(1, (el.block_width + bf.gap * mw) // advance)
+        lines = _wrap_cells(text, per_line)[:max(1, el.max_lines)]
+    else:
+        lines = [text.replace("\n", " ")]
+    # scale the stand-in font so its capital H fills the printer font's H
+    probe = PangoCairo.create_layout(cr)
+    desc = Pango.FontDescription.from_string(_BITMAP_FAMILY)
+    desc.set_weight(Pango.Weight.BOLD if bf.bold else Pango.Weight.NORMAL)
+    desc.set_absolute_size(100 * Pango.SCALE)
+    probe.set_font_description(desc)
+    probe.set_text("H", -1)
+    ink, _logical = probe.get_pixel_extents()
+    sx = bf.ink_w * mw / max(1, ink.width)
+    sy = bf.cap_h * mh / max(1, ink.height)
+    width = max((len(line) * advance - bf.gap * mw for line in lines if line), default=0)
+    el.measured_w = el.block_width or max(1, width)
+    el.measured_h = h * max(1, len(lines))
+
+    cr.save()
+    if el.reverse:
+        cr.set_operator(cairo.OPERATOR_DIFFERENCE)
+        cr.set_source_rgb(1, 1, 1)
+    else:
+        cr.set_source_rgb(0, 0, 0)
+    layout = PangoCairo.create_layout(cr)
+    layout.set_font_description(desc)
+    for row, line in enumerate(lines):
+        # Measured on Labelary: printers centre a line as if it were one character
+        # wider, and right-align by whole character advances.
+        if el.block_width and el.align == "C":
+            shift = (el.block_width - ((len(line) + 1) * advance - bf.gap * mw)) // 2
+        elif el.block_width and el.align == "R":
+            shift = el.block_width - len(line) * advance
+        else:
+            shift = 0
+        top = el.y + row * h
+        for i, ch in enumerate(line):
+            if ch == " ":
+                continue
+            layout.set_text(ch, -1)
+            cr.save()
+            cr.translate(el.x + shift + i * advance + bf.x_off * mw - ink.x * sx,
+                         top + bf.y_off * mh - ink.y * sy)
+            cr.scale(sx, sy)
+            PangoCairo.show_layout(cr, layout)
+            cr.restore()
+    cr.restore()
+
+
 def draw_text(cr, el: TextElement) -> None:
+    if el.bitmap_font():
+        draw_bitmap_text(cr, el)
+        return
     h = el.height
     xscale = (el.width or h) / h * WIDTH_FACTOR
     layout = _font_layout(cr, el.text, h)

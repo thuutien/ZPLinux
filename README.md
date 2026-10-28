@@ -24,7 +24,8 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 ## Features
 
 - **Start screen** with ready-made templates (shipping, product, price tag,
-  address, asset tag, blank sizes) and your recent labels
+  address, asset tag, blank sizes), **your own templates** (menu → Save as
+  Template; right-click one to delete it) and your recent labels
 - **Tabs**: open and edit several labels at once, each with its own undo
   history and zoom (Ctrl+T new, Ctrl+W close, Ctrl+PageUp/PageDown to switch)
 - **Canvas**: text, barcodes, QR codes, boxes/lines, ellipses and images
@@ -38,12 +39,19 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
   - Postal and legacy: Codabar, Code 11, Code 49, Industrial 2 of 5,
     Standard 2 of 5, LOGMARS, MSI, Plessey, Planet, POSTNET
 - **Smart guides**: elements snap to the label's edges and centre and to each
-  other (hold Alt to place freely); optional 5 mm grid
+  other (hold Alt to place freely); optional 5 mm grid. Turn the grid and
+  snapping on and off with the two buttons next to Undo/Redo in the top bar
 - **Work area around the label**: drag objects partly or wholly off the label
   (they show faded there). Only what is on the label prints; a part hanging off
   the left or top edge is sent as a graphic, since printers can't place fields
   there
 - **Layers list** to pick overlapping elements, plus align and arrange buttons
+- **Select several objects**: Shift-click, drag a box on empty space, or Ctrl+A;
+  then move, nudge, align (to each other), rotate, duplicate or delete them
+  together
+- **Printer fonts**: besides the scalable font 0, text can use the fonts built into
+  Zebra printers (A–H, including OCR-A and OCR-B). They come in whole-step sizes,
+  and the preview spaces, wraps and centres them exactly as the printer does
 - **Rotation**: turn text, barcodes and images by 90° steps (Ctrl+R, or the
   Rotation setting); boxes and ellipses swap width and height. QR codes and
   MaxiCode print upright, as printers draw them
@@ -54,9 +62,16 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
   600 dpi; label size presets (4×6, 4×2, 2×1 in…)
 - Live ZPL view with copy and export
 - **Variables**: type `{name}` in any text, barcode or QR field, fill it in on
-  the Label tab, or **print a batch from a CSV file** whose column headers match
+  the Label tab, or **print a batch from a CSV, Excel (.xlsx) or LibreOffice (.ods) file** whose column headers match
+- **Date, time and counter**: `{date}`, `{time}` and `{counter}` fill in when the
+  label prints (formats, start, step and zero padding on the Label tab); the
+  counter goes up for every label, copies and CSV batches included
 - Print over the network (TCP 9100), straight to a USB printer (`/dev/usb/lp0`),
-  through a raw CUPS queue, or to a `.zpl` file, with a connection test
+  through a raw CUPS queue, or to a `.zpl` file
+- **Printer checks**: before printing to a network or USB printer, ZPLinux asks
+  it for its model and status and warns when it is out of labels, open, set to a
+  different resolution, or narrower than the label. **Check Printer** shows the
+  model and status; **Calibrate Label Stock** measures new labels
 - **Import ZPL**: open `.prn` / `.zpl` files, such as ZebraDesigner's "print to
   file" output, as editable labels
 - Drop images, `.zplinux` or ZPL files onto the window
@@ -71,19 +86,22 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 [releases page](https://github.com/thuutien/ZPLinux/releases/latest):
 
 ```bash
-sudo apt install ./zplinux_0.6.1_all.deb
+sudo apt install ./zplinux_0.7.0_all.deb
 ```
 
-**Flatpak (any distribution)**: download `zplinux-0.6.1.flatpak` from the
+**Flatpak (any distribution)**: download `zplinux-0.7.0.flatpak` from the
 releases page and install it for your user. Flatpak fetches the GNOME runtime
 from Flathub if you don't have it yet:
 
 ```bash
-flatpak install --user ./zplinux-0.6.1.flatpak
+flatpak install --user ./zplinux-0.7.0.flatpak
 ```
 
-The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`), CUPS
-and your home folder. To build it yourself, run `packaging/build-flatpak.sh`.
+The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`) and CUPS;
+it opens and saves files through the system file chooser, so it only sees the
+files you pick. It updates through Flatpak rather than by itself. To build it
+yourself, run `packaging/build-flatpak.sh`; `packaging/flathub/` holds the
+manifest for Flathub, which builds from a release tag.
 
 **Arch / Manjaro**: build from `packaging/arch/PKGBUILD` with `makepkg -si`.
 

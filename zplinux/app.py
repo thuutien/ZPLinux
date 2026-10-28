@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import csv
+import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,16 +29,18 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 from . import (APP_ID, APP_NAME, __version__, printing, render, updater, zpl,  # noqa: E402
                zpl_import)
 from .canvas import LabelCanvas  # noqa: E402
-from .model import (DPI_CHOICES, KIND_NAMES, MM_PER_INCH, UNITS, BarcodeElement,  # noqa: E402
+from .model import (BITMAP_FONTS, DATE_FORMATS, DPI_CHOICES, KIND_NAMES,  # noqa: E402
+                    MM_PER_INCH, TIME_FORMATS, UNITS, BarcodeElement, magnification,
                     BoxElement, Code128Element, EllipseElement, Element, ImageElement, Label,
                     QRElement, TextElement, describe, dpmm, element_from_dict, to_unit, turn)
-from . import symbology, zint  # noqa: E402
+from . import datafile, symbology, zint  # noqa: E402
 from .templates import TEMPLATES  # noqa: E402
 from .widgets import CSS, PropertyForm, Toast, dim_label, icon_button  # noqa: E402
 
 SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "zplinux", "settings.json")
 # ZPLinux was called Labelix; its settings (printers, recent files) are copied over once,
 # from a normal install or from the Labelix Flatpak.
+TEMPLATES_DIR = os.path.join(os.path.dirname(SETTINGS_FILE), "templates")
 OLD_SETTINGS_FILES = (
     os.path.join(GLib.get_user_config_dir(), "labelix", "settings.json"),
     os.path.expanduser("~/.var/app/org.labelix.Labelix/config/labelix/settings.json"),
@@ -49,6 +53,9 @@ FAKE_PRINTER_CMD = (f"flatpak run --command=zplinux-fake-printer {APP_ID} --rend
                     else "zplinux-fake-printer --render" if INSTALLED
                     else "python3 tools/fake_printer.py --render")
 MAX_RECENT = 8
+# Shown under every text and barcode field that can hold {variables}.
+VARIABLES_HINT = ("Variables: {date}, {time} and {counter} fill in when printing. Any other "
+                  "name, like {name}, is yours to fill in on the Label tab or from a spreadsheet.")
 LABEL_EXTENSIONS = (".zplinux", ".labelix", ".json")   # .labelix: from before the rename
 ZPL_EXTENSIONS = (".zpl", ".prn")    # ZebraDesigner "print to file" writes .prn
 PRINTER_ICONS = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
@@ -179,6 +186,24 @@ def scroll_into_view(scrolled: Gtk.ScrolledWindow, widget: Gtk.Widget) -> None:
         adj.set_value(min(adj.get_upper() - adj.get_page_size(), bottom - adj.get_page_size()))
 
 
+def check_printer(cfg) -> str:
+    """One line about a printer: what it is and whether it is ready (network and USB
+    printers say), or whether it can be reached."""
+    if cfg.method in ("network", "device"):
+        try:
+            info = printing.identify(cfg)
+            state = printing.status(cfg)
+        except printing.PrintError:
+            pass                       # it may not answer queries; fall back below
+        else:
+            mark = "✗" if state.blocking() else "✓"
+            return f"{mark} {info.describe()}. {state.describe()}."
+    try:
+        return "✓ " + printing.test(cfg)
+    except printing.PrintError as e:
+        return "✗ " + str(e)
+
+
 def barcode_type(el) -> str:
     """The Type list's id for a barcode or QR element."""
     if isinstance(el, Code128Element):
@@ -200,7 +225,8 @@ class Document:
     values: dict = field(default_factory=dict)   # preview/print values for {variables}
     path: Optional[str] = None
     dirty: bool = False
-    selected: Optional[Element] = None
+    selected: Optional[Element] = None           # the main selected object
+    also: List[Element] = field(default_factory=list)   # more selected objects
     undo_stack: List[str] = field(default_factory=list)
     redo_stack: List[str] = field(default_factory=list)
     undo_key: Optional[str] = None
@@ -226,6 +252,7 @@ class Window(Gtk.ApplicationWindow):
     path = _doc_property("path")
     dirty = _doc_property("dirty")
     selected = _doc_property("selected")
+    also = _doc_property("also")
     undo_stack = _doc_property("undo_stack")
     redo_stack = _doc_property("redo_stack")
     undo_key = _doc_property("undo_key")
@@ -284,7 +311,8 @@ class Window(Gtk.ApplicationWindow):
         else:
             self.show_welcome()
 
-        if self.settings.get("check_updates", True) and \
+        # A Flatpak gets its updates from Flatpak (Flathub doesn't allow self-updating).
+        if not FLATPAK and self.settings.get("check_updates", True) and \
                 updater.due(self.settings.get("last_update_check", 0)):
             GLib.timeout_add_seconds(3, lambda: self.check_updates(manual=False) and False)
 
@@ -321,6 +349,7 @@ class Window(Gtk.ApplicationWindow):
         add("open", self.open_dialog, ["<Primary>o"])
         add("save", self.save, ["<Primary>s"])
         add("save-as", self.save_as, ["<Primary><Shift>s"])
+        add("save-template", self.save_as_template)
         add("export-zpl", self.export_zpl, ["<Primary>e"])
         add("export-png", self.export_png)
         add("print", self.print_label, ["<Primary>p"])
@@ -334,6 +363,7 @@ class Window(Gtk.ApplicationWindow):
         add("redo", self.redo, ["<Primary><Shift>z", "<Primary>y"])
         add("duplicate", self.duplicate_selected, ["<Primary>d"])
         add("rotate", lambda: self.rotate_selected(90), ["<Primary>r"])
+        add("lock", self.toggle_lock, ["<Primary>l"])
         add("zoom-in", lambda: self.set_zoom(self.canvas.zoom * 1.25),
             ["<Primary>plus", "<Primary>equal"])
         add("zoom-out", lambda: self.set_zoom(self.canvas.zoom / 1.25), ["<Primary>minus"])
@@ -349,9 +379,9 @@ class Window(Gtk.ApplicationWindow):
     def _set_snap(self, v):
         self.canvas.snap = v
 
-    EDITOR_ACTIONS = ("save", "save-as", "export-zpl", "export-png", "print", "print-csv",
+    EDITOR_ACTIONS = ("save", "save-as", "save-template", "export-zpl", "export-png", "print", "print-csv",
                       "undo", "redo", "duplicate", "zoom-in", "zoom-out", "zoom-100", "zoom-fit",
-                      "close-tab", "next-tab", "prev-tab", "rotate")
+                      "close-tab", "next-tab", "prev-tab", "rotate", "lock")
 
     def _editor_actions_enabled(self, on: bool):
         for name in self.EDITOR_ACTIONS:
@@ -391,19 +421,35 @@ class Window(Gtk.ApplicationWindow):
                         False, False, 0)
         hb.pack_start(hist)
         self.hist_box = hist
+        # Grid and snapping, at hand while designing (the same toggles as Ctrl+' etc.)
+        view = Gtk.Box()
+        view.get_style_context().add_class("linked")
+        for icon, tip, action in (
+                ("zplinux-grid-symbolic", "Show grid (Ctrl+')", "win.show-grid"),
+                ("zplinux-snap-symbolic", "Snap to edges, centres and other objects "
+                                          "(hold Alt to place freely)", "win.snap")):
+            b = Gtk.ToggleButton()
+            b.add(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+            b.set_tooltip_text(tip)
+            b.set_action_name(action)
+            view.pack_start(b, False, False, 0)
+        hb.pack_start(view)
+        self.view_box = view
 
         menu = Gio.Menu()
-        for items in ((("Save As…", "win.save-as"), ("Export ZPL…", "win.export-zpl"),
+        for items in ((("Save As…", "win.save-as"), ("Save as Template…", "win.save-template"),
+                       ("Export ZPL…", "win.export-zpl"),
                        ("Export PNG Preview…", "win.export-png")),
-                      (("Print from CSV…", "win.print-csv"),
+                      (("Print a Batch…", "win.print-csv"),
                        ("Printers…", "win.printer-settings")),
-                      (("Show Grid", "win.show-grid"), ("Snap to Guides", "win.snap")),
                       (("Preferences", "win.preferences"),
                        ("Keyboard Shortcuts", "win.shortcuts"),
                        ("Check for Updates", "win.check-updates"),
                        (f"About {APP_NAME}", "win.about"))):
             sec = Gio.Menu()
             for text, action in items:
+                if FLATPAK and action == "win.check-updates":
+                    continue
                 sec.append(text, action)
             menu.append_section(None, sec)
         mb = Gtk.MenuButton(menu_model=menu, use_popover=True)
@@ -457,15 +503,18 @@ class Window(Gtk.ApplicationWindow):
         btns = Gtk.Box(spacing=6, homogeneous=True)
         change = Gtk.Button(label="Printers…")
         change.connect("clicked", lambda *_: (pop.popdown(), self.printer_dialog()))
-        test = Gtk.Button(label="Test Connection")
+        test = Gtk.Button(label="Check Printer")
         test.connect("clicked", lambda *_: self._test_printer())
         btns.pack_start(change, True, True, 0)
         btns.pack_start(test, True, True, 0)
         box.pack_start(btns, False, False, 0)
         box.pack_start(Gtk.Separator(), False, False, 2)
-        csvb = Gtk.ModelButton(text="Print a Batch from CSV…")
+        csvb = Gtk.ModelButton(text="Print a Batch from a File…")
         csvb.set_action_name("win.print-csv")
         box.pack_start(csvb, False, False, 0)
+        calib = Gtk.ModelButton(text="Calibrate Label Stock…")
+        calib.connect("clicked", lambda *_: self.calibrate_printer())
+        box.pack_start(calib, False, False, 0)
         box.show_all()
         pop.connect("show", lambda *_: self._update_printer_info())
         return pop
@@ -498,14 +547,68 @@ class Window(Gtk.ApplicationWindow):
         self._update_printer_info()
 
     def _test_printer(self):
-        try:
-            msg = "✓ " + printing.test(self.printer)
-        except printing.PrintError as e:
-            msg = "✗ " + str(e)
-            if self.printer.method == "network" and self.printer.host in ("127.0.0.1", "localhost"):
-                msg += f"\nNo printer yet? Run: {FAKE_PRINTER_CMD}"
+        msg = check_printer(self.printer)
+        if msg.startswith("✗") and self.printer.method == "network" and \
+                self.printer.host in ("127.0.0.1", "localhost"):
+            msg += f"\nNo printer yet? Run: {FAKE_PRINTER_CMD}"
         self.pp_result.set_text(msg)
         self.pp_result.show()
+
+    def calibrate_printer(self):
+        cfg = self.printer
+        if cfg.method == "file":
+            self.notify("Choose a printer first: this one saves to a file.")
+            return
+        if not self.ask(f"Calibrate {cfg.title()}?",
+                        "The printer feeds a few labels to measure the label stock. Do this "
+                        "after loading a different kind of label.", "Calibrate"):
+            return
+        try:
+            printing.calibrate(cfg)
+        except (printing.PrintError, OSError) as e:
+            self.error("Could not calibrate", str(e))
+            return
+        self.notify(f"{cfg.title()} is calibrating")
+
+    def _preflight(self, cfg) -> bool:
+        """Before printing to a network or USB printer, ask it what it is and how it
+        is; warn about what would spoil the print. True to go ahead. A printer that
+        doesn't answer is printed to anyway."""
+        if cfg.method not in ("network", "device"):
+            return True
+        try:
+            info = printing.identify(cfg, timeout=1.5)
+            state = printing.status(cfg, timeout=1.5)
+        except printing.PrintError:
+            return True
+        name = info.model or cfg.title()
+        if state.blocking():
+            problems = "; ".join(state.blocking())
+            if not self.ask(f"{name} can't print right now",
+                            f"It reports: {problems}. Fix that and print again, or send the "
+                            "job anyway; the printer prints it once it's fixed.",
+                            "Send Anyway"):
+                return False
+        lab = self.label
+        if info.dpi and info.dpi != lab.dpi:
+            if not self.ask(f"The {name} prints at {info.dpi} dpi",
+                            f"This label is set for {lab.dpi} dpi, so it would print "
+                            f"{'larger' if info.dpi < lab.dpi else 'smaller'} than designed. "
+                            f"Set Resolution on the Label tab to {info.dpi} dpi.",
+                            "Print Anyway"):
+                return False
+        width_mm = lab.stock_mm[0]
+        max_mm = info.max_width_dots / dpmm(info.dpi) if info.max_width_dots else 0
+        if max_mm and width_mm > max_mm + 0.5:
+            if not self.ask(f"The label is too wide for the {name}",
+                            f"The label prints {width_mm:.0f} mm wide, but the {name} prints "
+                            f"at most {max_mm:.0f} mm; the rest would be cut off. For a "
+                            "landscape design, try Rotate when printing on the Label tab.",
+                            "Print Anyway"):
+                return False
+        if state.paused:
+            self.notify(f"{name} is paused: the label prints when you resume it")
+        return True
 
     # ---- update bar ---------------------------------------------------------
 
@@ -571,6 +674,16 @@ class Window(Gtk.ApplicationWindow):
         flow.add(self._custom_card())
         outer.pack_start(flow, False, False, 0)
 
+        self.user_head = Gtk.Label(label="Your templates", xalign=0)
+        self.user_head.get_style_context().add_class("sidebar-title")
+        self.user_head.set_no_show_all(True)
+        outer.pack_start(self.user_head, False, False, 6)
+        self.user_flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                                     min_children_per_line=2, max_children_per_line=5,
+                                     column_spacing=12, row_spacing=12)
+        self.user_flow.set_no_show_all(True)
+        outer.pack_start(self.user_flow, False, False, 0)
+
         self.recent_head = Gtk.Label(label="Recent", xalign=0)
         self.recent_head.get_style_context().add_class("sidebar-title")
         self.recent_head.set_no_show_all(True)
@@ -598,7 +711,8 @@ class Window(Gtk.ApplicationWindow):
         btn.connect("clicked", lambda *_: cb())
         return btn
 
-    def _template_card(self, name, size, factory) -> Gtk.Widget:
+    def _template_card(self, name, size, factory, menu=None) -> Gtk.Widget:
+        """A start-screen card; menu: (text, callback) pairs for its right-click menu."""
         lab, values = factory()
         surf = thumbnail(lab, values, 150, 100)
         area = Gtk.DrawingArea()
@@ -618,7 +732,116 @@ class Window(Gtk.ApplicationWindow):
             cr.rectangle(x + 0.5, y + 0.5, surf.get_width() - 1, surf.get_height() - 1)
             cr.stroke()
         area.connect("draw", draw)
-        return self._card(area, name, size, lambda: self.start_from(factory))
+        card = self._card(area, name, size, lambda: self.start_from(factory))
+        if menu:
+            def on_press(_w, ev):
+                if ev.button != 3:
+                    return False
+                m = Gtk.Menu()
+                for text, cb in menu:
+                    it = Gtk.MenuItem(label=text)
+                    it.connect("activate", lambda *_a, cb=cb: cb())
+                    m.append(it)
+                m.show_all()
+                m.attach_to_widget(card, None)
+                m.popup_at_pointer(ev)
+                return True
+            card.connect("button-press-event", on_press)
+        return card
+
+    # ---- your templates -----------------------------------------------------
+
+    def _refresh_user_templates(self):
+        for c in self.user_flow.get_children():
+            self.user_flow.remove(c)
+        found = []
+        if os.path.isdir(TEMPLATES_DIR):
+            for fname in sorted(os.listdir(TEMPLATES_DIR), key=str.lower):
+                if not fname.endswith(".zplinux"):
+                    continue
+                path = os.path.join(TEMPLATES_DIR, fname)
+                try:
+                    with open(path) as f:
+                        text = f.read()
+                    Label.from_json(text)
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+                found.append((fname[:-len(".zplinux")], path, text))
+        for name, path, text in found:
+            def factory(text=text):
+                return Label.from_json(text), json.loads(text).get("preview_values", {})
+            lab = Label.from_json(text)
+            if self.unit == "in":
+                size = f"{lab.width_mm / MM_PER_INCH:g} × {lab.height_mm / MM_PER_INCH:g} in"
+            else:
+                size = f"{lab.width_mm:g} × {lab.height_mm:g} mm"
+            card = self._template_card(name, size, factory,
+                                       menu=[("Delete Template",
+                                              lambda p=path, n=name: self.delete_template(p, n))])
+            card.set_tooltip_text("Right-click to delete")
+            card.show_all()
+            self.user_flow.add(card)
+        self.user_flow.set_visible(bool(found))
+        self.user_head.set_visible(bool(found))
+        for child in self.user_flow.get_children():
+            child.show()
+
+    def save_as_template(self):
+        """Keep the current label on the start screen, to start new labels from."""
+        dlg = Gtk.Dialog(title="Save as Template", transient_for=self, modal=True,
+                         use_header_bar=True)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.get_widget_for_response(Gtk.ResponseType.OK).get_style_context().add_class(
+            "suggested-action")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=16)
+        default = os.path.splitext(self.doc.name())[0]
+        entry = Gtk.Entry(text="" if default == "Untitled label" else default,
+                          placeholder_text="e.g. Sorter label", activates_default=True)
+        box.pack_start(dim_label("Your templates appear on the start screen. Starting from "
+                                 "one makes a new label; the template stays as it is."),
+                       False, False, 0)
+        box.pack_start(entry, False, False, 0)
+        dlg.get_content_area().add(box)
+        dlg.set_default_size(400, -1)
+        dlg.show_all()
+        name = None
+        while dlg.run() == Gtk.ResponseType.OK:
+            name = re.sub(r'[\\/:*?"<>|]', "-", entry.get_text().strip())
+            if not name:
+                continue
+            path = os.path.join(TEMPLATES_DIR, name + ".zplinux")
+            if os.path.exists(path) and not self.ask(
+                    f"Replace the template “{name}”?", "A template with that name exists.",
+                    "Replace"):
+                name = None
+                continue
+            break
+        else:
+            name = None
+        dlg.destroy()
+        if not name:
+            return
+        try:
+            os.makedirs(TEMPLATES_DIR, exist_ok=True)
+            with open(os.path.join(TEMPLATES_DIR, name + ".zplinux"), "w") as f:
+                f.write(self._document_json())
+        except OSError as e:
+            self.error("Could not save the template", str(e))
+            return
+        self._refresh_user_templates()
+        self.notify(f"Saved “{name}” as a template")
+
+    def delete_template(self, path, name):
+        if not self.ask(f"Delete the template “{name}”?",
+                        "Labels made from it are not affected.", "Delete"):
+            return
+        try:
+            os.remove(path)
+        except OSError as e:
+            self.error("Could not delete the template", str(e))
+            return
+        self._refresh_user_templates()
 
     def _custom_card(self) -> Gtk.Widget:
         img = Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.DIALOG)
@@ -664,8 +887,9 @@ class Window(Gtk.ApplicationWindow):
 
     def show_welcome(self):
         self._refresh_recent()
+        self._refresh_user_templates()
         self.stack.set_visible_child_name("welcome")
-        for w in (self.hist_box, self.print_box, self.save_btn):
+        for w in (self.hist_box, self.view_box, self.print_box, self.save_btn):
             w.hide()
         self.back_btn.set_visible(bool(self.docs))
         self.tabs.hide()
@@ -674,7 +898,7 @@ class Window(Gtk.ApplicationWindow):
 
     def show_editor(self):
         self.stack.set_visible_child_name("editor")
-        for w in (self.hist_box, self.print_box, self.save_btn):
+        for w in (self.hist_box, self.view_box, self.print_box, self.save_btn):
             w.show()
         self.back_btn.hide()
         self.tabs.show()
@@ -725,9 +949,10 @@ class Window(Gtk.ApplicationWindow):
         t = Gtk.Label(label="Layers", xalign=0)
         t.get_style_context().add_class("sidebar-title")
         inner.pack_start(t, False, False, 6)
-        self.layers = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.layers = Gtk.ListBox(selection_mode=Gtk.SelectionMode.MULTIPLE,
+                                  activate_on_single_click=False)
         self.layers.get_style_context().add_class("layers")
-        self.layers.connect("row-selected", self._on_layer_selected)
+        self.layers.connect("selected-rows-changed", self._on_layer_selected)
         placeholder = dim_label("Nothing on the label yet. Add something above, or drop an "
                                 "image onto the label.")
         placeholder.set_margin_start(6)
@@ -745,6 +970,7 @@ class Window(Gtk.ApplicationWindow):
         self.scroller.get_style_context().add_class("canvas-bg")
         self.canvas = LabelCanvas(self)
         self.canvas.show_grid = self.settings.get("show_grid", False)
+        self.canvas.grid_mm = float(self.settings.get("grid_mm", 5))
         self.canvas.snap = self.settings.get("snap", True)
         self.canvas.connect("scroll-event", self.on_scroll)
         self.scroller.add(self.canvas)
@@ -1107,8 +1333,11 @@ class Window(Gtk.ApplicationWindow):
         self._update_history_buttons()
 
     def _snapshot(self) -> str:
-        idx = self.label.elements.index(self.selected) if self.selected in self.label.elements else -1
-        return json.dumps({"label": self.label.to_json(), "sel": idx, "values": self.values})
+        index = {id(e): i for i, e in enumerate(self.label.elements)}
+        idx = index.get(id(self.selected), -1)
+        also = [index[id(e)] for e in self.also if id(e) in index]
+        return json.dumps({"label": self.label.to_json(), "sel": idx, "also": also,
+                           "values": self.values})
 
     def checkpoint(self, key: Optional[str] = None):
         """Call before a change. Repeated changes with the same key (typing, spinning)
@@ -1129,6 +1358,8 @@ class Window(Gtk.ApplicationWindow):
         sel = d["sel"]
         self.undo_key = None
         self.selected = self.label.elements[sel] if 0 <= sel < len(self.label.elements) else None
+        self.also = [self.label.elements[i] for i in d.get("also", [])
+                     if 0 <= i < len(self.label.elements)]
         self._shown_vars = None
         self.build_props()
         self.refresh_label_panel()
@@ -1214,72 +1445,149 @@ class Window(Gtk.ApplicationWindow):
                             w=max(4, round(w * scale)), h=max(4, round(h * scale)))
 
     def delete_selected(self):
-        el = self.selected
-        if not el:
+        sel = self.selection
+        if not sel:
             return
         self.checkpoint()
-        self.label.elements.remove(el)
+        for el in sel:
+            self.label.elements[:] = [e for e in self.label.elements if e is not el]
         self.select(None)
         self.structure_changed()
-        self.notify(f"{KIND_NAMES[el.kind]} deleted", "Undo", self.undo)
+        what = KIND_NAMES[sel[0].kind] if len(sel) == 1 else f"{len(sel)} objects"
+        self.notify(f"{what} deleted", "Undo", self.undo)
 
     def duplicate_selected(self):
-        if not self.selected:
+        sel = self.selection
+        if not sel:
             return
         self.checkpoint()
-        el = element_from_dict(self.selected.to_dict())
-        el.x += dpmm(self.label.dpi) * 2
-        el.y += dpmm(self.label.dpi) * 2
-        self.label.elements.append(el)
-        self.select(el)
+        copies = []
+        for src in sel:
+            el = element_from_dict(src.to_dict())
+            el.x += dpmm(self.label.dpi) * 2
+            el.y += dpmm(self.label.dpi) * 2
+            self.label.elements.append(el)
+            copies.append(el)
+        self.set_selection(copies)
         self.structure_changed()
 
     def restack(self, where: str):
-        el = self.selected
-        if not el:
+        sel = self.selection
+        if not sel:
             return
         els = self.label.elements
-        i = els.index(el)
-        j = {"top": len(els) - 1, "bottom": 0, "up": min(len(els) - 1, i + 1),
-             "down": max(0, i - 1)}[where]
-        if i == j:
+        chosen = [e for e in els if any(e is s for s in sel)]
+        rest = [e for e in els if not any(e is s for s in sel)]
+        if where == "top":
+            new = rest + chosen
+        elif where == "bottom":
+            new = chosen + rest
+        else:
+            new = list(els)
+            order = range(len(new) - 2, -1, -1) if where == "up" else range(1, len(new))
+            step = 1 if where == "up" else -1
+            for i in order:              # each selected object passes one other object
+                j = i + step
+                if any(new[i] is s for s in sel) and not any(new[j] is s for s in sel):
+                    new[i], new[j] = new[j], new[i]
+        if all(a is b for a, b in zip(new, els)):
             return
         self.checkpoint()
-        els.insert(j, els.pop(i))
+        els[:] = new
         self.structure_changed()
 
     def align(self, where: str):
-        el = self.selected
-        if not el:
+        """One object: to the label's edges and centre. Several: to each other (the
+        box around them)."""
+        sel = [e for e in self.selection if not e.locked]
+        if not sel:
             return
-        _x, _y, w, h = el.bounds()
-        W, H = self.label.width_dots, self.label.height_dots
+        if len(sel) == 1:
+            L, T, R, B = 0, 0, self.label.width_dots, self.label.height_dots
+        else:
+            boxes = [e.bounds() for e in sel]
+            L, T = min(b[0] for b in boxes), min(b[1] for b in boxes)
+            R, B = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
         self.checkpoint()
-        if where == "left":
-            el.x = 0
-        elif where == "hcenter":
-            el.x = max(0, round((W - w) / 2))
-        elif where == "right":
-            el.x = max(0, W - w)
-        elif where == "top":
-            el.y = 0
-        elif where == "vcenter":
-            el.y = max(0, round((H - h) / 2))
-        elif where == "bottom":
-            el.y = max(0, H - h)
-        self.element_changed(el)
+        for el in sel:
+            _x, _y, w, h = el.bounds()
+            if where == "left":
+                el.x = L
+            elif where == "hcenter":
+                el.x = round((L + R - w) / 2)
+            elif where == "right":
+                el.x = R - w
+            elif where == "top":
+                el.y = T
+            elif where == "vcenter":
+                el.y = round((T + B - h) / 2)
+            elif where == "bottom":
+                el.y = B - h
+        self.element_changed(self.selected)
 
-    def select(self, el: Optional[Element]):
-        if el is self.selected and (el is None or self.props_form is not None):
+    # ---- selection ----------------------------------------------------------
+
+    @property
+    def selection(self) -> List[Element]:
+        """Everything selected, the main object last."""
+        live = {id(e) for e in self.label.elements}
+        sel = [e for e in self.also if id(e) in live]
+        if self.selected is not None and id(self.selected) in live:
+            sel.append(self.selected)
+        return sel
+
+    def is_selected(self, el) -> bool:
+        return any(e is el for e in self.selection)
+
+    def set_selection(self, els: List[Element]):
+        """Select these objects; the last is the main one (its settings show)."""
+        els = [e for i, e in enumerate(els) if not any(e is f for f in els[:i])]
+        main = els[-1] if els else None
+        changed = (main is not self.selected or len(els) - 1 != len(self.also)
+                   or not all(any(e is a for a in self.also) for e in els[:-1]))
+        self.also = els[:-1]
+        if not changed and self.props_form is not None:
             return
-        self.selected = el
+        self.selected = main
         self.undo_key = None
         self.build_props()
-        if el is not None:
+        if main is not None:
             self.panel_stack.set_visible_child_name("element")
         self._sync_layer_selection()
         self.canvas.queue_draw()
         self.update_status()
+
+    def toggle_selected(self, el: Element):
+        """Shift-click: add an object to the selection or take it out."""
+        sel = self.selection
+        if any(e is el for e in sel):
+            self.set_selection([e for e in sel if e is not el])
+        else:
+            self.set_selection(sel + [el])
+
+    def select_all(self):
+        """Everything that isn't locked."""
+        self.set_selection([e for e in self.label.elements if not e.locked])
+
+    def toggle_lock(self):
+        """Lock the selection in place, or unlock it if it is all locked."""
+        sel = self.selection
+        if not sel:
+            return
+        lock = not all(e.locked for e in sel)
+        self.checkpoint()
+        for el in sel:
+            el.locked = lock
+        self._layers_sig = None
+        self.refresh_layers()
+        self.build_props()
+        self.canvas.queue_draw()
+        self.mark_dirty()
+        self.notify("Locked: pick it in Layers to change or unlock it" if lock else "Unlocked")
+
+    def select(self, el: Optional[Element]):
+        """Select just this object (None: nothing)."""
+        self.set_selection([el] if el is not None else [])
 
     def activate_element(self, el: Element):
         """Double-click or Enter: jump to the element's main field."""
@@ -1345,7 +1653,7 @@ class Window(Gtk.ApplicationWindow):
 
     def refresh_layers(self):
         els = self.label.elements
-        sig = tuple((id(e), e.kind, self.describe(e)) for e in els) + (self.unit,)
+        sig = tuple((id(e), e.kind, self.describe(e), e.locked) for e in els) + (self.unit,)
         if sig != self._layers_sig:
             self._layers_sig = sig
             self._syncing_layers = True
@@ -1365,6 +1673,11 @@ class Window(Gtk.ApplicationWindow):
                 col.pack_start(k, False, False, 0)
                 col.pack_start(d, False, False, 0)
                 box.pack_start(col, True, True, 0)
+                if el.locked:
+                    lk = Gtk.Image.new_from_icon_name("changes-prevent-symbolic",
+                                                      Gtk.IconSize.BUTTON)
+                    lk.set_tooltip_text("Locked")
+                    box.pack_end(lk, False, False, 0)
                 row.add(box)
                 row.show_all()
                 self.layers.add(row)
@@ -1373,16 +1686,20 @@ class Window(Gtk.ApplicationWindow):
 
     def _sync_layer_selection(self):
         self._syncing_layers = True
-        target = next((r for r in self.layers.get_children() if r.element is self.selected), None)
-        if target is not None:
-            self.layers.select_row(target)
-        else:
-            self.layers.unselect_all()
+        for row in self.layers.get_children():
+            if self.is_selected(row.element):
+                self.layers.select_row(row)
+            else:
+                self.layers.unselect_row(row)
         self._syncing_layers = False
 
-    def _on_layer_selected(self, lb, row):
-        if not self._syncing_layers:
-            self.select(row.element if row is not None else None)
+    def _on_layer_selected(self, lb):
+        """Click a layer to select it; Ctrl-click or Shift-click for several."""
+        if self._syncing_layers:
+            return
+        picked = [r.element for r in lb.get_selected_rows()]
+        keep = [e for e in self.selection if any(e is p for p in picked)]
+        self.set_selection(keep + [e for e in picked if not any(e is k for k in keep)])
 
     # ---- element panel ------------------------------------------------------
 
@@ -1405,6 +1722,18 @@ class Window(Gtk.ApplicationWindow):
         if child:
             self.props_box.remove(child)
         el = self.selected
+        if len(self.selection) > 1:
+            # several objects: what applies to all of them
+            sel = self.selection
+            form = PropertyForm(lambda attr: None, self.unit, self.label.dpi)
+            form.section(f"{len(sel)} objects selected")
+            form.hint("Shift-click an object to add it or take it out; drag on empty space "
+                      "to select a group. Align lines them up with each other.")
+            self._layout_tools(form, any(e.can_rotate() for e in sel))
+            self.props_form = form
+            self.props_box.add(form)
+            self.props_box.show_all()
+            return
         if el is None:
             self.props_form = None
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, valign=Gtk.Align.CENTER,
@@ -1438,11 +1767,9 @@ class Window(Gtk.ApplicationWindow):
         if isinstance(el, TextElement):
             form.section("Text")
             form.textarea(None, p, "text")
-            form.hint("Type {name} to fill in a value at print time.")
+            form.hint(VARIABLES_HINT)
             form.section("Font")
-            form.length("Size", p, "height", 10, 2000)
-            form.length("Character width", p, "width", 0, 2000)
-            form.hint("Character width 0 keeps normal proportions.")
+            self._font_rows(form, el, p)
             form.switch("White on black", p, "reverse")
             form.section("Text box")
             wrap = SimpleNamespace(on=bool(el.block_width))
@@ -1471,6 +1798,7 @@ class Window(Gtk.ApplicationWindow):
             self._barcode_type_row(form, el)
             form.entry(None, p, "data", "e.g. ABC-123 or {sku}")
             form.hint("Code 128: letters, digits and symbols (printable ASCII).")
+            form.hint(VARIABLES_HINT)
             form.section("Size")
             form.length("Bar height", p, "height", 10, maxh)
             form.spin("Narrow bar (dots)", p, "module", 1, 10)
@@ -1483,6 +1811,7 @@ class Window(Gtk.ApplicationWindow):
             form.section("QR code")
             self._barcode_type_row(form, el)
             form.entry(None, p, "data", "Text, a link, or {variable}")
+            form.hint(VARIABLES_HINT)
             form.section("Size")
             form.spin("Module size (dots)", p, "magnification", 1, 10)
             form.combo("Error correction", p, "error_correction",
@@ -1512,6 +1841,18 @@ class Window(Gtk.ApplicationWindow):
                       "threshold print black.")
 
         form.section("Position")
+        lock = SimpleNamespace(on=el.locked)
+
+        def lock_toggled(_attr):
+            if lock.on != el.locked:
+                GLib.idle_add(lambda: self.toggle_lock() and False)
+        normal = form.on_change
+        form.on_change = lock_toggled
+        form.switch("Locked", lock, "on")
+        form.on_change = normal
+        if el.locked:
+            form.hint("Locked: it can't be clicked or dragged on the label. Pick it in "
+                      "Layers to change it.")
         # objects may sit partly or wholly off the label; only the part on it prints
         form.length("X", p, "x", -10 * maxw, 10 * maxw)
         form.length("Y", p, "y", -10 * maxh, 10 * maxh)
@@ -1519,47 +1860,71 @@ class Window(Gtk.ApplicationWindow):
             form.combo("Rotation", p, "rotation",
                        [(0, "0°"), (90, "90° clockwise"), (180, "180°"),
                         (270, "90° counterclockwise")])
-        align = Gtk.Box(spacing=8, homogeneous=True)
-        tips = {"left": "Align to left edge", "hcenter": "Center horizontally",
-                "right": "Align to right edge", "top": "Align to top edge",
-                "vcenter": "Center vertically", "bottom": "Align to bottom edge"}
-        for group in (("left", "hcenter", "right"), ("top", "vcenter", "bottom")):
-            g = Gtk.Box(homogeneous=True)
-            g.get_style_context().add_class("linked")
-            for where in group:
-                g.pack_start(icon_button(f"zplinux-align-{where}-symbolic", tips[where],
-                                         lambda w=where: self.align(w), flat=False), True, True, 0)
-            align.pack_start(g, True, True, 0)
-        form.widget(align)
-
-        form.section("Arrange")
-        arr = Gtk.Box(spacing=6)
-        order = Gtk.Box()
-        order.get_style_context().add_class("linked")
-        for icon, tip, where in (("go-top-symbolic", "Bring to front", "top"),
-                                 ("go-up-symbolic", "Bring forward", "up"),
-                                 ("go-down-symbolic", "Send backward", "down"),
-                                 ("go-bottom-symbolic", "Send to back", "bottom")):
-            order.pack_start(icon_button(icon, tip, lambda w=where: self.restack(w), flat=False),
-                             False, False, 0)
-        arr.pack_start(order, False, False, 0)
-        arr.pack_start(icon_button("edit-copy-symbolic", "Duplicate (Ctrl+D)",
-                                   self.duplicate_selected, flat=False), False, False, 0)
-        if el.can_rotate():
-            arr.pack_start(icon_button("object-rotate-right-symbolic",
-                                       "Rotate 90° clockwise (Ctrl+R)",
-                                       lambda: self.rotate_selected(90), flat=False),
-                           False, False, 0)
-        delete = icon_button("user-trash-symbolic", "Delete (Del)", self.delete_selected, flat=False)
-        delete.get_style_context().add_class("destructive-action")
-        arr.pack_end(delete, False, False, 0)
-        form.widget(arr)
+        self._layout_tools(form, el.can_rotate())
 
         self.props_form = form
         self.props_box.add(form)
         self.props_box.show_all()
 
     # ---- label panel --------------------------------------------------------
+
+    # ---- text fonts ---------------------------------------------------------
+
+    def _font_rows(self, form, el, p):
+        """Font list; font 0 takes any size, the printer fonts A-H whole steps."""
+        fonts = [("0", "0 – scalable (CG Triumvirate)")] + [
+            (k, f"{bf.name} – {bf.cell_h} × {bf.cell_w} dots" + (", capitals" if bf.capitals
+                                                                 else ""))
+            for k, bf in BITMAP_FONTS.items()]
+        combo = Gtk.ComboBoxText()
+        for key, text in fonts:
+            combo.append(key, text)
+        combo.set_active_id(el.font if el.font in BITMAP_FONTS else "0")
+
+        def changed(c):
+            key = c.get_active_id()
+            if key is None or key == el.font:
+                return
+            h, _w = el.font_size()
+            self.checkpoint()
+            el.font = key
+            bf = el.bitmap_font()
+            if bf:          # snap to whole steps, keeping about the same size
+                el.height = bf.cell_h * magnification(h, bf.cell_h)
+                el.width = 0
+            self.mark_dirty()
+            GLib.idle_add(self.build_props)
+        combo.connect("changed", changed)
+        form.widget(combo, "Font")
+        bf = el.bitmap_font()
+        if bf is None:
+            form.length("Size", p, "height", 10, 2000)
+            form.length("Character width", p, "width", 0, 2000)
+            form.hint("Character width 0 keeps normal proportions.")
+            return
+        h, w = el.font_size()
+        steps = SimpleNamespace(tall=h // bf.cell_h, wide=w // bf.cell_w)
+
+        def step_changed(attr):
+            if attr == "tall":
+                p.height = bf.cell_h * steps.tall
+            else:
+                p.width = bf.cell_w * steps.wide
+            size_note.set_text(note())
+        normal = form.on_change
+        form.on_change = step_changed
+        form.spin("Height (× cell)", steps, "tall", 1, 10)
+        form.spin("Width (× cell)", steps, "wide", 1, 10)
+        form.on_change = normal
+
+        def note():
+            hh, ww = el.font_size()
+            d = dpmm(self.label.dpi)
+            pitch = (ww + bf.gap * ww // bf.cell_w) / d
+            return (f"Characters are {hh / d:.1f} mm tall and {pitch:.1f} mm apart. A font "
+                    "built into the printer: it prints exactly the size shown.")
+        size_note = dim_label(note())
+        form.widget(size_note)
 
     # ---- barcode types ------------------------------------------------------
 
@@ -1636,6 +2001,7 @@ class Window(Gtk.ApplicationWindow):
             form.hint(f"Unknown barcode type '{el.symbology}'.")
             return
         form.hint(spec.hint)
+        form.hint(VARIABLES_HINT)
         if not zint.available():
             form.hint("Install zint to see this barcode in the preview; it prints without it.")
         opts = spec.options
@@ -1662,22 +2028,60 @@ class Window(Gtk.ApplicationWindow):
         if "check" in opts:
             form.switch("Add check digit", p, "check")
 
+    def _layout_tools(self, form, rotatable: bool):
+        """Align buttons and the Arrange row, for one object or several."""
+        align = Gtk.Box(spacing=8, homogeneous=True)
+        tips = {"left": "Align to left edge", "hcenter": "Center horizontally",
+                "right": "Align to right edge", "top": "Align to top edge",
+                "vcenter": "Center vertically", "bottom": "Align to bottom edge"}
+        for group in (("left", "hcenter", "right"), ("top", "vcenter", "bottom")):
+            g = Gtk.Box(homogeneous=True)
+            g.get_style_context().add_class("linked")
+            for where in group:
+                g.pack_start(icon_button(f"zplinux-align-{where}-symbolic", tips[where],
+                                         lambda w=where: self.align(w), flat=False), True, True, 0)
+            align.pack_start(g, True, True, 0)
+        form.widget(align)
+
+        form.section("Arrange")
+        arr = Gtk.Box(spacing=6)
+        order = Gtk.Box()
+        order.get_style_context().add_class("linked")
+        for icon, tip, where in (("go-top-symbolic", "Bring to front", "top"),
+                                 ("go-up-symbolic", "Bring forward", "up"),
+                                 ("go-down-symbolic", "Send backward", "down"),
+                                 ("go-bottom-symbolic", "Send to back", "bottom")):
+            order.pack_start(icon_button(icon, tip, lambda w=where: self.restack(w), flat=False),
+                             False, False, 0)
+        arr.pack_start(order, False, False, 0)
+        arr.pack_start(icon_button("edit-copy-symbolic", "Duplicate (Ctrl+D)",
+                                   self.duplicate_selected, flat=False), False, False, 0)
+        if rotatable:
+            arr.pack_start(icon_button("object-rotate-right-symbolic",
+                                       "Rotate 90° clockwise (Ctrl+R)",
+                                       lambda: self.rotate_selected(90), flat=False),
+                           False, False, 0)
+        delete = icon_button("user-trash-symbolic", "Delete (Del)", self.delete_selected, flat=False)
+        delete.get_style_context().add_class("destructive-action")
+        arr.pack_end(delete, False, False, 0)
+        form.widget(arr)
+
     def rotate_selected(self, step: int = 90):
-        """Turn the selected object about its centre."""
-        el = self.selected
-        if el is None:
-            return
-        if not el.can_rotate():
-            self.notify(f"{KIND_NAMES.get(el.kind, 'This code')} prints upright; it scans "
-                        "from any side.")
+        """Turn the selected objects, each about its own centre."""
+        sel = [e for e in self.selection if e.can_rotate() and not e.locked]
+        if not sel:
+            if self.selected is not None:
+                self.notify(f"{KIND_NAMES.get(self.selected.kind, 'This code')} prints "
+                            "upright; it scans from any side.")
             return
         self.checkpoint()
-        bx, by, bw, bh = el.bounds()
-        turn(el, step)
-        _x, _y, nw, nh = el.bounds()
-        el.x, el.y = round(bx + (bw - nw) / 2), round(by + (bh - nh) / 2)
+        for el in sel:
+            bx, by, bw, bh = el.bounds()
+            turn(el, step)
+            _x, _y, nw, nh = el.bounds()
+            el.x, el.y = round(bx + (bw - nw) / 2), round(by + (bh - nh) / 2)
         self.build_props()
-        self.element_changed(el)
+        self.element_changed(self.selected)
 
     def set_orientation(self, degrees: int):
         """How the design is turned when printed (onto label stock the other way round).
@@ -1755,10 +2159,23 @@ class Window(Gtk.ApplicationWindow):
         form.spin("Darkness adjust", p, "darkness", -30, 30)
         form.hint("0 keeps the printer's own darkness setting.")
 
+        form.section("Date, time and counter")
+        form.hint("Type {date}, {time} or {counter} in any text or barcode. They are "
+                  "filled in when the label prints; the counter goes up by one step "
+                  "for every label.")
+        now = datetime.datetime.now()
+        form.combo("Date", p, "date_format",
+                   [(f, now.strftime(f)) for f, _ex in DATE_FORMATS])
+        form.combo("Time", p, "time_format",
+                   [(f, now.strftime(f)) for f, _ex in TIME_FORMATS])
+        self.counter_spin = form.spin("Next number", p, "counter_next", -999999, 99999999)
+        form.spin("Step", p, "counter_step", 1, 1000)
+        form.spin("Digits (pad with zeros)", p, "counter_digits", 0, 12)
+
         form.section("Variables")
         self.vars_grid = Gtk.Grid(column_spacing=10, row_spacing=8)
         form.widget(self.vars_grid)
-        csvb = Gtk.Button(label="Print a Batch from CSV…")
+        csvb = Gtk.Button(label="Print a Batch from a File…")
         csvb.set_action_name("win.print-csv")
         form.widget(csvb)
         self._shown_vars = None
@@ -1770,7 +2187,7 @@ class Window(Gtk.ApplicationWindow):
         grid = getattr(self, "vars_grid", None)
         if grid is None:
             return
-        names = self.label.variables()
+        names = self.label.manual_variables()
         if self._shown_vars == names:
             return
         self._shown_vars = names
@@ -1779,7 +2196,7 @@ class Window(Gtk.ApplicationWindow):
         if not names:
             grid.attach(dim_label("Type {name} in any text, barcode or QR field to create a "
                                   "variable. Fill it in here, or print one label per row of a "
-                                  "CSV file whose column headers match."), 0, 0, 2, 1)
+                                  "CSV or spreadsheet file whose column headers match."), 0, 0, 2, 1)
         entries = []
         for i, name in enumerate(names):
             grid.attach(Gtk.Label(label=name, xalign=0), 0, i, 1, 1)
@@ -1850,7 +2267,9 @@ class Window(Gtk.ApplicationWindow):
         parts = [f"{self.fmt(lab.width_dots)} × {self.fmt(lab.height_dots)} {u} · {lab.dpi} dpi"]
         if self._cursor:
             parts.append(f"Pointer {self.fmt(self._cursor[0])}, {self.fmt(self._cursor[1])}")
-        if self.selected:
+        if len(self.selection) > 1:
+            parts.append(f"{len(self.selection)} objects selected")
+        elif self.selected:
             _bx, _by, bw, bh = self.selected.bounds()
             parts.append(f"{KIND_NAMES[self.selected.kind]} {self.fmt(bw)} × {self.fmt(bh)}")
             where = zpl.placement(self.selected, lab)
@@ -1922,6 +2341,7 @@ class Window(Gtk.ApplicationWindow):
                 sep()
             item("Duplicate", self.duplicate_selected)
             item("Rotate 90°", lambda: self.rotate_selected(90))
+            item("Unlock" if el.locked else "Lock", self.toggle_lock)
             item("Delete", self.delete_selected)
             sep()
             item("Bring to Front", lambda: self.restack("top"))
@@ -1946,11 +2366,14 @@ class Window(Gtk.ApplicationWindow):
             return False
         key = Gdk.keyval_name(ev.keyval) or ""
         # Leave typing keys alone while an input field has focus; Escape returns to the canvas.
-        if isinstance(self.get_focus(), (Gtk.Entry, Gtk.TextView)):
+        if isinstance(self.get_focus(), (Gtk.Entry, Gtk.TextView, Gtk.SpinButton)):
             if key == "Escape":
                 self.canvas.grab_focus()
                 return True
             return False
+        if ev.state & Gdk.ModifierType.CONTROL_MASK and key.lower() == "a":
+            self.select_all()
+            return True
         if ev.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
             return False
         shift = bool(ev.state & Gdk.ModifierType.SHIFT_MASK)
@@ -1973,9 +2396,14 @@ class Window(Gtk.ApplicationWindow):
         if key in moves and self.selected:
             step = dpmm(self.label.dpi) if shift else 1
             dx, dy = moves[key]
+            movable = [e for e in self.selection if not e.locked]
+            if not movable:
+                self.notify("Locked objects stay where they are; unlock with Ctrl+L.")
+                return True
             self.checkpoint("nudge")
-            self.selected.x = max(0, self.selected.x + dx * step)
-            self.selected.y = max(0, self.selected.y + dy * step)
+            for el in movable:
+                el.x += dx * step
+                el.y += dy * step
             self.element_changed(self.selected)
             return True
         return False
@@ -1983,41 +2411,42 @@ class Window(Gtk.ApplicationWindow):
     # ---- printing -----------------------------------------------------------
 
     def print_label(self):
-        missing = [v for v in self.label.variables() if not self.values.get(v)]
+        missing = [v for v in self.label.manual_variables() if not self.values.get(v)]
         if missing and not self.ask("Some variables are empty",
                                     f"{', '.join(missing)} will print as written. Print anyway?",
                                     "Print"):
             return
         n = self.label.copies
-        self._send(self.current_zpl(), f"{n} label{'s' if n != 1 else ''}")
+        if self._send(self.current_zpl(), f"{n} label{'s' if n != 1 else ''}"):
+            self._advance_counter(zpl.labels_printed(self.label))
 
     def print_csv(self):
-        dlg = Gtk.FileChooserNative.new("Print from CSV", self, Gtk.FileChooserAction.OPEN, None, None)
-        f = Gtk.FileFilter()
-        f.set_name("CSV files")
-        f.add_pattern("*.csv")
-        f.add_pattern("*.CSV")
-        dlg.add_filter(f)
+        """Print one label per row of a CSV, Excel or LibreOffice file."""
+        dlg = Gtk.FileChooserNative.new("Print a Batch", self, Gtk.FileChooserAction.OPEN,
+                                        None, None)
+        for name, exts in (("Spreadsheets and CSV", datafile.EXTENSIONS),
+                           ("CSV files", (".csv", ".tsv", ".txt")),
+                           ("Excel (.xlsx)", (".xlsx", ".xlsm")),
+                           ("LibreOffice / OpenOffice (.ods)", (".ods",))):
+            f = Gtk.FileFilter()
+            f.set_name(name)
+            for ext in exts:
+                f.add_pattern("*" + ext)
+                f.add_pattern("*" + ext.upper())
+            dlg.add_filter(f)
         self._set_dialog_folder(dlg)
         if dlg.run() != Gtk.ResponseType.ACCEPT:
             return
         path = dlg.get_filename()
         try:
-            with open(path, newline="", encoding="utf-8-sig") as fh:
-                sample = fh.read(4096)
-                fh.seek(0)
-                try:
-                    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-                except csv.Error:
-                    dialect = csv.excel
-                rows = list(csv.DictReader(fh, dialect=dialect))
-        except (OSError, UnicodeDecodeError, csv.Error) as e:
-            self.error("Could not read CSV", str(e))
+            rows = datafile.read_rows(path)
+        except datafile.DataFileError as e:
+            self.error("Could not read the file", str(e))
             return
         if not rows:
-            self.error("Nothing to print", "The CSV file has no data rows.")
+            self.error("Nothing to print", "The file has no data rows below its headers.")
             return
-        needed = self.label.variables()
+        needed = self.label.manual_variables()
         cols = [c for c in rows[0].keys() if c]
         missing = [v for v in needed if v not in cols]
         copies = self.label.copies
@@ -2026,20 +2455,35 @@ class Window(Gtk.ApplicationWindow):
                   f"({self.printer.describe()}).\n"
                   f"Columns: {', '.join(cols)}")
         if missing:
-            detail += ("\n\nNot in the CSV (the values from the Label tab are used): "
+            detail += ("\n\nNot in the file (the values from the Label tab are used): "
                        + ", ".join(missing))
         if not self.ask(f"Print {len(rows) * copies} labels?", detail, "Print"):
             return
         merged = [{**self.values, **{k: (v or "") for k, v in r.items() if k}} for r in rows]
-        self._send(zpl.batch_zpl(self.label, merged), f"{len(rows)} labels from CSV")
+        if self._send(zpl.batch_zpl(self.label, merged),
+                      f"{len(rows)} labels from {os.path.basename(path)}"):
+            self._advance_counter(zpl.labels_printed(self.label, len(rows)))
+
+    def _advance_counter(self, printed: int):
+        """After printing, {counter} carries on from the next number."""
+        lab = self.label
+        if not lab.uses_counter():
+            return
+        lab.counter_next += printed * lab.counter_step
+        if getattr(self, "counter_spin", None) is not None:
+            self.counter_spin.set_value(lab.counter_next)
+        self.mark_dirty()
 
     def _send(self, data: str, what: str):
+        """Send a print job; True when it went out."""
         cfg = self.printer
         if cfg.method == "file" and not cfg.file_path:
             path = self.choose_save("Save Print Job", "job.zpl", ("ZPL files", "*.zpl"))
             if not path:
-                return
+                return False
             cfg = printing.PrinterConfig(name=cfg.name, method="file", file_path=path)
+        if not self._preflight(cfg):
+            return False
         try:
             where = printing.send(data, cfg)
         except printing.PrintError as e:
@@ -2048,11 +2492,12 @@ class Window(Gtk.ApplicationWindow):
                 hint = ("\n\nTesting without a printer? Start the fake printer first:\n"
                         + FAKE_PRINTER_CMD)
             self.error("Printing failed", str(e) + hint)
-            return
+            return False
         except OSError as e:
             self.error("Printing failed", str(e))
-            return
+            return False
         self.notify(f"Sent {what} to {cfg.title()} ({where})")
+        return True
 
     def printer_dialog(self):
         dlg = Gtk.Dialog(title="Printers", transient_for=self, modal=True, use_header_bar=True)
@@ -2143,7 +2588,7 @@ class Window(Gtk.ApplicationWindow):
         default = Gtk.CheckButton(label="Default printer")
         grid.attach(default, 0, 3, 2, 1)
         test_row = Gtk.Box(spacing=10)
-        test = Gtk.Button(label="Test Connection")
+        test = Gtk.Button(label="Check Printer")
         result = dim_label("")
         result.set_selectable(True)
         test_row.pack_start(test, False, False, 0)
@@ -2250,10 +2695,7 @@ class Window(Gtk.ApplicationWindow):
 
         def run_test():
             store()
-            try:
-                result.set_text("✓ " + printing.test(state.current))
-            except printing.PrintError as e:
-                result.set_text("✗ " + str(e))
+            result.set_text(check_printer(state.current))
 
         addb = icon_button("list-add-symbolic", "Add printer", add, flat=False)
         remove = icon_button("list-remove-symbolic", "Remove printer", delete, flat=False)
@@ -2288,6 +2730,7 @@ class Window(Gtk.ApplicationWindow):
         dlg.set_default_size(440, -1)
         prefs = SimpleNamespace(units=self.unit,
                                 show_grid=self.canvas.show_grid,
+                                grid_mm=float(self.canvas.grid_mm),
                                 snap=self.canvas.snap,
                                 check_updates=self.settings.get("check_updates", True))
 
@@ -2306,6 +2749,10 @@ class Window(Gtk.ApplicationWindow):
                 self.lookup_action(action).set_state(GLib.Variant.new_boolean(v))
                 self.settings[attr] = v
                 (self._set_grid if attr == "show_grid" else self._set_snap)(v)
+            elif attr == "grid_mm":
+                self.settings["grid_mm"] = v
+                self.canvas.grid_mm = v
+                self.canvas.queue_draw()
             elif attr == "check_updates":
                 self.settings["check_updates"] = v
             save_settings(self.settings)
@@ -2315,16 +2762,30 @@ class Window(Gtk.ApplicationWindow):
         form.combo("Units", prefs, "units", [("mm", "Millimetres"), ("in", "Inches"),
                                              ("dots", "Printer dots")])
         form.switch("Show grid", prefs, "show_grid")
+        if self.unit == "in":
+            spacings = [(1.27, "0.05 in"), (2.54, "0.1 in"), (3.175, "⅛ in"), (6.35, "¼ in"),
+                        (12.7, "½ in")]
+        else:
+            spacings = [(1.0, "1 mm"), (2.0, "2 mm"), (2.5, "2.5 mm"), (5.0, "5 mm"),
+                        (10.0, "10 mm")]
+        if all(abs(v - prefs.grid_mm) > 1e-6 for v, _t in spacings):
+            spacings.append((prefs.grid_mm, f"{prefs.grid_mm:g} mm"))
+        form.combo("Grid spacing", prefs, "grid_mm", spacings)
         form.switch("Snap to edges and centers", prefs, "snap")
-        form.hint("Hold Alt while dragging to place things freely.")
+        form.hint("With the grid shown, snapping also lines things up with it. Hold Alt "
+                  "while dragging to place things freely.")
         form.section("Updates")
-        form.switch("Check for updates automatically", prefs, "check_updates")
-        row = Gtk.Box(spacing=10)
-        btn = Gtk.Button(label="Check Now")
-        btn.connect("clicked", lambda *_: self.check_updates(manual=True))
-        row.pack_start(btn, False, False, 0)
-        row.pack_start(dim_label(f"You have version {__version__}."), True, True, 0)
-        form.widget(row)
+        if FLATPAK:
+            form.hint(f"You have version {__version__}. Updates come through Flatpak, "
+                      "with your software centre or flatpak update.")
+        else:
+            form.switch("Check for updates automatically", prefs, "check_updates")
+            row = Gtk.Box(spacing=10)
+            btn = Gtk.Button(label="Check Now")
+            btn.connect("clicked", lambda *_: self.check_updates(manual=True))
+            row.pack_start(btn, False, False, 0)
+            row.pack_start(dim_label(f"You have version {__version__}."), True, True, 0)
+            form.widget(row)
         dlg.get_content_area().add(form)
         dlg.show_all()
         dlg.run()
@@ -2340,6 +2801,8 @@ class Window(Gtk.ApplicationWindow):
             editing=_shortcut_rows([("<Primary>z", "Undo"), ("<Primary><Shift>z", "Redo"),
                                     ("<Primary>d", "Duplicate"), ("Delete", "Delete"),
                                     ("<Primary>r", "Rotate 90° clockwise"),
+                                    ("<Primary>a", "Select everything"),
+                                    ("<Primary>l", "Lock or unlock the selection"),
                                     ("Tab", "Select next element"),
                                     ("Return", "Edit the selected element's content"),
                                     ("Left Right Up Down", "Move by one dot"),

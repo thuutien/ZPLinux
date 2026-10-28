@@ -111,7 +111,8 @@ def element_zpl(el) -> List[str]:
     fo = field_origin(el)
     o = orientation(el)
     if isinstance(el, TextElement):
-        cmd = f"{fo}^A0{o},{el.height},{el.width or el.height}"
+        h, w = el.font_size()
+        cmd = f"{fo}^A{el.font if el.bitmap_font() else '0'}{o},{h},{w}"
         if el.block_width:
             cmd += f"^FB{el.block_width},{max(1, el.max_lines)},0,{el.align},0"
         if el.reverse:
@@ -193,8 +194,14 @@ def to_print(lab: Label) -> Label:
 
 
 def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
-              copies: Optional[int] = None) -> str:
-    lab = label.filled(values)
+              copies: Optional[int] = None, offset: int = 0) -> str:
+    """ZPL for the label. offset: how many labels have been printed before this one in
+    the job, for {counter}."""
+    n = copies if copies is not None else label.copies
+    if n > 1 and label.uses_counter():
+        # each copy gets its own number, so each is its own label
+        return "".join(label_zpl(label, values, 1, offset + i) for i in range(n))
+    lab = label.filled(values, offset)
     if lab.orientation % 360 or any(el.x < 0 or el.y < 0 or el.rotation % 360
                                     for el in lab.elements):
         # sizes decide what is left on the label, and where rotated fields go
@@ -219,7 +226,6 @@ def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
             lines.extend(visible_zpl(el, lab))
         else:
             lines.extend(element_zpl(el))
-    n = copies if copies is not None else lab.copies
     if n > 1:
         lines.append(f"^PQ{n}")
     lines.append("^XZ")
@@ -227,5 +233,13 @@ def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
 
 
 def batch_zpl(label: Label, rows: Iterable[Dict[str, str]]) -> str:
-    """One label per row of variable values, each printed `label.copies` times."""
-    return "".join(label_zpl(label, row) for row in rows)
+    """One label per row of variable values, each printed `label.copies` times; the
+    counter goes on from label to label."""
+    rows = list(rows)
+    per_row = label.copies if label.uses_counter() else 1
+    return "".join(label_zpl(label, row, offset=i * per_row) for i, row in enumerate(rows))
+
+
+def labels_printed(label: Label, rows: int = 1) -> int:
+    """How many labels a job prints, for moving the counter on."""
+    return rows * max(1, label.copies)

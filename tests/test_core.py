@@ -101,6 +101,76 @@ class RenameTests(unittest.TestCase):
             Label.from_json('{"format": "something else"}')
 
 
+class PrinterFontTests(unittest.TestCase):
+    def test_sizes_round_to_whole_steps(self):
+        # measured on Labelary: font D's cell is 18 x 10; 27 x 15 prints at 2x, 54 x 10 at 3x 1x
+        self.assertEqual(TextElement(font="D", height=27, width=15).font_size(), (36, 20))
+        self.assertEqual(TextElement(font="D", height=54, width=10).font_size(), (54, 10))
+        self.assertEqual(TextElement(font="D", height=8, width=4).font_size(), (18, 10))
+        self.assertEqual(TextElement(font="D", height=40).font_size(), (36, 20))
+
+    def test_zpl_uses_exact_multiples(self):
+        out = zpl.label_zpl(Label(elements=[TextElement(x=20, y=20, text="Hi", font="E",
+                                                        height=60, rotation=90)]))
+        self.assertIn("^AER,56,30^FH_^FDHi^FS", out)
+
+    def test_preview_width_matches_the_printer(self):
+        # ten capital H in font D at 1x: 9 advances of 12 dots plus one 9-dot H on Labelary
+        from zplinux import render
+        lab = Label(elements=[TextElement(text="H" * 10, font="D", height=18)])
+        render.measure(lab)
+        self.assertEqual(lab.elements[0].measured_w, 9 * 12 + 10)
+        self.assertEqual(lab.elements[0].measured_h, 18)
+
+    def test_font_is_saved(self):
+        lab = Label(elements=[TextElement(font="B")])
+        self.assertEqual(Label.from_json(lab.to_json()).elements[0].font, "B")
+
+
+class AutoFieldTests(unittest.TestCase):
+    def lab(self, text, **kw):
+        return Label(elements=[TextElement(text=text)], **kw)
+
+    def test_date_and_time(self):
+        import datetime
+        lab = self.lab("{date} {time}", date_format="%Y-%m-%d", time_format="%H:%M")
+        when = datetime.datetime(2026, 2, 11, 9, 40, 25)
+        self.assertEqual(lab.auto_values(now=when)["date"], "2026-02-11")
+        self.assertEqual(lab.auto_values(now=when)["time"], "09:40")
+        self.assertEqual(lab.manual_variables(), [])
+
+    def test_counter_padding_and_step(self):
+        lab = self.lab("#{counter}", counter_next=7, counter_step=5, counter_digits=4)
+        self.assertEqual(lab.filled({}).elements[0].text, "#0007")
+        self.assertEqual(lab.filled({}, offset=2).elements[0].text, "#0017")
+
+    def test_each_copy_gets_its_own_number(self):
+        out = zpl.label_zpl(self.lab("#{counter}", counter_next=7, copies=3))
+        self.assertEqual(out.count("^XA"), 3)
+        for n in (7, 8, 9):
+            self.assertIn(f"^FD#{n}^FS", out)
+        self.assertNotIn("^PQ", out)
+
+    def test_copies_without_a_counter_use_pq(self):
+        out = zpl.label_zpl(self.lab("Hi", copies=3))
+        self.assertEqual(out.count("^XA"), 1)
+        self.assertIn("^PQ3", out)
+
+    def test_batch_carries_the_counter_on(self):
+        lab = self.lab("{name} #{counter}", counter_next=1, copies=2)
+        out = zpl.batch_zpl(lab, [{"name": "A"}, {"name": "B"}])
+        for text in ("A #1", "A #2", "B #3", "B #4"):
+            self.assertIn(f"^FD{text}^FS", out)
+        self.assertEqual(zpl.labels_printed(lab, 2), 4)
+        self.assertEqual(lab.manual_variables(), ["name"])
+
+    def test_settings_are_saved(self):
+        lab = self.lab("x", date_format="%m/%d/%Y", counter_next=42, counter_digits=3)
+        back = Label.from_json(lab.to_json())
+        self.assertEqual((back.date_format, back.counter_next, back.counter_digits),
+                         ("%m/%d/%Y", 42, 3))
+
+
 class RotationTests(unittest.TestCase):
     def test_rotate_rect(self):
         # a 10 x 4 rect at the top-left of a 100 x 50 area
@@ -158,6 +228,11 @@ class RotationTests(unittest.TestCase):
         zpl.label_zpl(lab)
         self.assertEqual(lab.to_json(), before)
         self.assertEqual(lab.stock_mm, (101.6, 152.4))
+
+    def test_lock_is_saved(self):
+        lab = Label(elements=[BoxElement(locked=True), TextElement()])
+        self.assertEqual([e.locked for e in Label.from_json(lab.to_json()).elements],
+                         [True, False])
 
     def test_orientation_is_saved(self):
         lab = Label(orientation=90)
@@ -296,6 +371,55 @@ class PrintingTests(unittest.TestCase):
     def test_missing_device(self):
         with self.assertRaises(printing.PrintError):
             printing.send("^XA^XZ", printing.PrinterConfig(method="device", device="/nonexistent/lp9"))
+
+
+class PrinterQueryTests(unittest.TestCase):
+    HI = b"\x02GX420d-200dpi,ZSP-002098B,8,2104KB\x03\r\n"
+    HS = (b"\x02030,1,0,1235,000,0,0,0,000,0,0,0\x03\r\n"
+          b"\x02000,0,1,0,0,2,6,0,00000000,1,188\x03\r\n\x021234,0\x03\r\n")
+
+    def test_identify(self):
+        info = printing.parse_info(self.HI)
+        self.assertEqual((info.model, info.dpi, info.max_width_dots), ("GX420d", 203, 832))
+        self.assertIn("104 mm", info.describe())
+        unknown = printing.parse_info(b"\x02XYZ999-300dpi,V1,12,8MB\x03")
+        self.assertEqual((unknown.dpi, unknown.max_width_dots), (300, 0))
+
+    def test_status(self):
+        st = printing.parse_status(self.HS)
+        self.assertEqual((st.paper_out, st.paused, st.head_open), (True, False, True))
+        self.assertEqual(st.blocking(), ["out of labels", "the print head is open"])
+        ready = printing.parse_status(self.HS.replace(b"030,1,", b"030,0,")
+                                      .replace(b"000,0,1,", b"000,0,0,"))
+        self.assertEqual(ready.describe(), "Ready")
+
+    def test_fake_printer_answers(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "tools", "fake_printer.py")
+        proc = subprocess.Popen([sys.executable, script, "--port", str(port), "--state", "paused",
+                                 "--out", tempfile.mkdtemp()], stdout=subprocess.DEVNULL)
+        try:
+            cfg = printing.PrinterConfig(method="network", host="127.0.0.1", port=port)
+            for _ in range(50):
+                try:
+                    info = printing.identify(cfg)
+                    break
+                except printing.PrintError:
+                    time.sleep(0.1)
+            self.assertEqual((info.model, info.dpi), ("GK420d", 203))
+            st = printing.status(cfg)
+            self.assertTrue(st.paused)
+            self.assertEqual(st.blocking(), [])
+        finally:
+            proc.terminate()
+            proc.wait()
+
+    def test_cups_queues_cant_be_asked(self):
+        with self.assertRaises(printing.PrintError):
+            printing.query(printing.PrinterConfig(method="cups", cups_queue="x"), b"~HI")
 
 
 class SavedPrinterTests(unittest.TestCase):

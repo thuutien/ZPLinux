@@ -17,7 +17,8 @@ from typing import Dict, List, Optional, Tuple
 
 from . import barcode, symbology
 from .model import (BarcodeElement, BoxElement, Code128Element, EllipseElement, ImageElement,
-                    Label, QRElement, TextElement, dpmm, rotate_rect)
+                    Label, QRElement, TextElement, dpmm, rotate_rect, BITMAP_FONTS,
+                    magnification)
 from .zpl import QR_Y_SHIFT
 
 # Where things land relative to ^FT, measured against Labelary at 203 dpi:
@@ -355,7 +356,7 @@ def _parse_label(text: str, dpi: Optional[int], graphics) -> ImportResult:
             else:
                 rot = rest[:1] if rest[:1].isalpha() else ""
                 h, w = _ints(rest[1:].lstrip(",") if rot else rest.lstrip(","), 2)
-                if font != "0":
+                if font != "0" and font.upper() not in BITMAP_FONTS:
                     note(f"Printer font {font} was replaced by font 0 at the same size.")
             f.font = font
             f.rotation = (rot or default_rotation).upper()
@@ -555,6 +556,11 @@ def _element(f: _Field, default_font, graphics, values, note):
         w = f.width or (default_font[2] if not f.height else 0)
         el = TextElement(x=f.x, y=f.y, height=h, width=0 if w == h else w,
                          reverse=f.reverse, rotation=DEGREES.get(f.rotation, 0))
+        if f.font.upper() in BITMAP_FONTS:
+            el.font = f.font.upper()
+            bf = BITMAP_FONTS[el.font]
+            if not f.width or (w and magnification(w, bf.cell_w) == magnification(h, bf.cell_h)):
+                el.width = 0       # proportional
         if f.block:
             bw, lines, align = f.block
             if not lines:      # ^TB: lines from the block height
