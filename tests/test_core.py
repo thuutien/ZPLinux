@@ -203,6 +203,11 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(lab.to_json(), before)
         self.assertEqual(lab.stock_mm, (101.6, 152.4))
 
+    def test_lock_is_saved(self):
+        lab = Label(elements=[BoxElement(locked=True), TextElement()])
+        self.assertEqual([e.locked for e in Label.from_json(lab.to_json()).elements],
+                         [True, False])
+
     def test_orientation_is_saved(self):
         lab = Label(orientation=90)
         self.assertEqual(Label.from_json(lab.to_json()).orientation, 90)

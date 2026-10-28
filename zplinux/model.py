@@ -65,6 +65,7 @@ class Element:
     x: int = 20               # top-left of the (rotated) element
     y: int = 20
     rotation: int = 0         # clockwise: 0, 90, 180 or 270
+    locked: bool = False      # can't be clicked, dragged or resized on the canvas
 
     def bounds(self) -> tuple:
         """(x, y, w, h) in dots, used for selection and hit-testing: the rotated box."""

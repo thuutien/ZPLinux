@@ -359,6 +359,7 @@ class Window(Gtk.ApplicationWindow):
         add("redo", self.redo, ["<Primary><Shift>z", "<Primary>y"])
         add("duplicate", self.duplicate_selected, ["<Primary>d"])
         add("rotate", lambda: self.rotate_selected(90), ["<Primary>r"])
+        add("lock", self.toggle_lock, ["<Primary>l"])
         add("zoom-in", lambda: self.set_zoom(self.canvas.zoom * 1.25),
             ["<Primary>plus", "<Primary>equal"])
         add("zoom-out", lambda: self.set_zoom(self.canvas.zoom / 1.25), ["<Primary>minus"])
@@ -376,7 +377,7 @@ class Window(Gtk.ApplicationWindow):
 
     EDITOR_ACTIONS = ("save", "save-as", "export-zpl", "export-png", "print", "print-csv",
                       "undo", "redo", "duplicate", "zoom-in", "zoom-out", "zoom-100", "zoom-fit",
-                      "close-tab", "next-tab", "prev-tab", "rotate")
+                      "close-tab", "next-tab", "prev-tab", "rotate", "lock")
 
     def _editor_actions_enabled(self, on: bool):
         for name in self.EDITOR_ACTIONS:
@@ -1369,7 +1370,7 @@ class Window(Gtk.ApplicationWindow):
     def align(self, where: str):
         """One object: to the label's edges and centre. Several: to each other (the
         box around them)."""
-        sel = self.selection
+        sel = [e for e in self.selection if not e.locked]
         if not sel:
             return
         if len(sel) == 1:
@@ -1436,7 +1437,24 @@ class Window(Gtk.ApplicationWindow):
             self.set_selection(sel + [el])
 
     def select_all(self):
-        self.set_selection(list(self.label.elements))
+        """Everything that isn't locked."""
+        self.set_selection([e for e in self.label.elements if not e.locked])
+
+    def toggle_lock(self):
+        """Lock the selection in place, or unlock it if it is all locked."""
+        sel = self.selection
+        if not sel:
+            return
+        lock = not all(e.locked for e in sel)
+        self.checkpoint()
+        for el in sel:
+            el.locked = lock
+        self._layers_sig = None
+        self.refresh_layers()
+        self.build_props()
+        self.canvas.queue_draw()
+        self.mark_dirty()
+        self.notify("Locked: pick it in Layers to change or unlock it" if lock else "Unlocked")
 
     def select(self, el: Optional[Element]):
         """Select just this object (None: nothing)."""
@@ -1506,7 +1524,7 @@ class Window(Gtk.ApplicationWindow):
 
     def refresh_layers(self):
         els = self.label.elements
-        sig = tuple((id(e), e.kind, self.describe(e)) for e in els) + (self.unit,)
+        sig = tuple((id(e), e.kind, self.describe(e), e.locked) for e in els) + (self.unit,)
         if sig != self._layers_sig:
             self._layers_sig = sig
             self._syncing_layers = True
@@ -1526,6 +1544,11 @@ class Window(Gtk.ApplicationWindow):
                 col.pack_start(k, False, False, 0)
                 col.pack_start(d, False, False, 0)
                 box.pack_start(col, True, True, 0)
+                if el.locked:
+                    lk = Gtk.Image.new_from_icon_name("changes-prevent-symbolic",
+                                                      Gtk.IconSize.BUTTON)
+                    lk.set_tooltip_text("Locked")
+                    box.pack_end(lk, False, False, 0)
                 row.add(box)
                 row.show_all()
                 self.layers.add(row)
@@ -1691,6 +1714,18 @@ class Window(Gtk.ApplicationWindow):
                       "threshold print black.")
 
         form.section("Position")
+        lock = SimpleNamespace(on=el.locked)
+
+        def lock_toggled(_attr):
+            if lock.on != el.locked:
+                GLib.idle_add(lambda: self.toggle_lock() and False)
+        normal = form.on_change
+        form.on_change = lock_toggled
+        form.switch("Locked", lock, "on")
+        form.on_change = normal
+        if el.locked:
+            form.hint("Locked: it can't be clicked or dragged on the label. Pick it in "
+                      "Layers to change it.")
         # objects may sit partly or wholly off the label; only the part on it prints
         form.length("X", p, "x", -10 * maxw, 10 * maxw)
         form.length("Y", p, "y", -10 * maxh, 10 * maxh)
@@ -1848,7 +1883,7 @@ class Window(Gtk.ApplicationWindow):
 
     def rotate_selected(self, step: int = 90):
         """Turn the selected objects, each about its own centre."""
-        sel = [e for e in self.selection if e.can_rotate()]
+        sel = [e for e in self.selection if e.can_rotate() and not e.locked]
         if not sel:
             if self.selected is not None:
                 self.notify(f"{KIND_NAMES.get(self.selected.kind, 'This code')} prints "
@@ -2121,6 +2156,7 @@ class Window(Gtk.ApplicationWindow):
                 sep()
             item("Duplicate", self.duplicate_selected)
             item("Rotate 90°", lambda: self.rotate_selected(90))
+            item("Unlock" if el.locked else "Lock", self.toggle_lock)
             item("Delete", self.delete_selected)
             sep()
             item("Bring to Front", lambda: self.restack("top"))
@@ -2175,8 +2211,12 @@ class Window(Gtk.ApplicationWindow):
         if key in moves and self.selected:
             step = dpmm(self.label.dpi) if shift else 1
             dx, dy = moves[key]
+            movable = [e for e in self.selection if not e.locked]
+            if not movable:
+                self.notify("Locked objects stay where they are; unlock with Ctrl+L.")
+                return True
             self.checkpoint("nudge")
-            for el in self.selection:
+            for el in movable:
                 el.x += dx * step
                 el.y += dy * step
             self.element_changed(self.selected)
@@ -2557,6 +2597,7 @@ class Window(Gtk.ApplicationWindow):
                                     ("<Primary>d", "Duplicate"), ("Delete", "Delete"),
                                     ("<Primary>r", "Rotate 90° clockwise"),
                                     ("<Primary>a", "Select everything"),
+                                    ("<Primary>l", "Lock or unlock the selection"),
                                     ("Tab", "Select next element"),
                                     ("Return", "Edit the selected element's content"),
                                     ("Left Right Up Down", "Move by one dot"),

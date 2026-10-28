@@ -134,6 +134,8 @@ class LabelCanvas(Gtk.DrawingArea):
     def hit(self, x: float, y: float) -> Optional[Element]:
         pad = 4 / self.zoom
         for el in reversed(self.label.elements):
+            if el.locked:
+                continue              # clicks go through to what is underneath
             bx, by, bw, bh = el.bounds()
             if not (bx - pad <= x <= bx + bw + pad and by - pad <= y <= by + bh + pad):
                 continue
@@ -148,7 +150,7 @@ class LabelCanvas(Gtk.DrawingArea):
 
     def on_handle(self, ex: float, ey: float) -> bool:
         el = self.host.selected
-        if not el or len(self.host.selection) != 1:
+        if not el or el.locked or len(self.host.selection) != 1:
             return False
         x, y, w, h = el.bounds()
         ox, oy = self.origin()
@@ -328,7 +330,8 @@ class LabelCanvas(Gtk.DrawingArea):
             # make the grabbed object the main one, keeping the others
             self.host.set_selection([e for e in self.host.selection if e is not el] + [el])
         self.drag = {"mode": "move", "x": x, "y": y, "orig": (el.x, el.y), "started": False,
-                     "group": [(e, e.x, e.y) for e in self.host.selection if e is not el]}
+                     "group": [(e, e.x, e.y) for e in self.host.selection
+                               if e is not el and not e.locked]}
         return True
 
     def on_motion(self, widget, ev):
@@ -399,7 +402,7 @@ class LabelCanvas(Gtk.DrawingArea):
             self.drag = None
             if d["started"]:
                 touched = [e for e in self.label.elements
-                           if self._inside(e.bounds(), x0, y0, x1, y1)]
+                           if not e.locked and self._inside(e.bounds(), x0, y0, x1, y1)]
                 self.host.set_selection(d["keep"] + [e for e in touched
                                                      if not any(e is k for k in d["keep"])])
             self.queue_draw()
