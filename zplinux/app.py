@@ -33,7 +33,7 @@ from .model import (DATE_FORMATS, DPI_CHOICES, KIND_NAMES, MM_PER_INCH,  # noqa:
                     TIME_FORMATS, UNITS, BarcodeElement,
                     BoxElement, Code128Element, EllipseElement, Element, ImageElement, Label,
                     QRElement, TextElement, describe, dpmm, element_from_dict, to_unit, turn)
-from . import symbology, zint  # noqa: E402
+from . import datafile, symbology, zint  # noqa: E402
 from .templates import TEMPLATES  # noqa: E402
 from .widgets import CSS, PropertyForm, Toast, dim_label, icon_button  # noqa: E402
 
@@ -55,7 +55,7 @@ FAKE_PRINTER_CMD = (f"flatpak run --command=zplinux-fake-printer {APP_ID} --rend
 MAX_RECENT = 8
 # Shown under every text and barcode field that can hold {variables}.
 VARIABLES_HINT = ("Variables: {date}, {time} and {counter} fill in when printing. Any other "
-                  "name, like {name}, is yours to fill in on the Label tab or from a CSV file.")
+                  "name, like {name}, is yours to fill in on the Label tab or from a spreadsheet.")
 LABEL_EXTENSIONS = (".zplinux", ".labelix", ".json")   # .labelix: from before the rename
 ZPL_EXTENSIONS = (".zpl", ".prn")    # ZebraDesigner "print to file" writes .prn
 PRINTER_ICONS = {"network": "network-wired-symbolic", "device": "drive-harddisk-usb-symbolic",
@@ -439,7 +439,7 @@ class Window(Gtk.ApplicationWindow):
         for items in ((("Save As…", "win.save-as"), ("Save as Template…", "win.save-template"),
                        ("Export ZPL…", "win.export-zpl"),
                        ("Export PNG Preview…", "win.export-png")),
-                      (("Print from CSV…", "win.print-csv"),
+                      (("Print a Batch…", "win.print-csv"),
                        ("Printers…", "win.printer-settings")),
                       (("Preferences", "win.preferences"),
                        ("Keyboard Shortcuts", "win.shortcuts"),
@@ -506,7 +506,7 @@ class Window(Gtk.ApplicationWindow):
         btns.pack_start(test, True, True, 0)
         box.pack_start(btns, False, False, 0)
         box.pack_start(Gtk.Separator(), False, False, 2)
-        csvb = Gtk.ModelButton(text="Print a Batch from CSV…")
+        csvb = Gtk.ModelButton(text="Print a Batch from a File…")
         csvb.set_action_name("win.print-csv")
         box.pack_start(csvb, False, False, 0)
         calib = Gtk.ModelButton(text="Calibrate Label Stock…")
@@ -2116,7 +2116,7 @@ class Window(Gtk.ApplicationWindow):
         form.section("Variables")
         self.vars_grid = Gtk.Grid(column_spacing=10, row_spacing=8)
         form.widget(self.vars_grid)
-        csvb = Gtk.Button(label="Print a Batch from CSV…")
+        csvb = Gtk.Button(label="Print a Batch from a File…")
         csvb.set_action_name("win.print-csv")
         form.widget(csvb)
         self._shown_vars = None
@@ -2137,7 +2137,7 @@ class Window(Gtk.ApplicationWindow):
         if not names:
             grid.attach(dim_label("Type {name} in any text, barcode or QR field to create a "
                                   "variable. Fill it in here, or print one label per row of a "
-                                  "CSV file whose column headers match."), 0, 0, 2, 1)
+                                  "CSV or spreadsheet file whose column headers match."), 0, 0, 2, 1)
         entries = []
         for i, name in enumerate(names):
             grid.attach(Gtk.Label(label=name, xalign=0), 0, i, 1, 1)
@@ -2362,30 +2362,30 @@ class Window(Gtk.ApplicationWindow):
             self._advance_counter(zpl.labels_printed(self.label))
 
     def print_csv(self):
-        dlg = Gtk.FileChooserNative.new("Print from CSV", self, Gtk.FileChooserAction.OPEN, None, None)
-        f = Gtk.FileFilter()
-        f.set_name("CSV files")
-        f.add_pattern("*.csv")
-        f.add_pattern("*.CSV")
-        dlg.add_filter(f)
+        """Print one label per row of a CSV, Excel or LibreOffice file."""
+        dlg = Gtk.FileChooserNative.new("Print a Batch", self, Gtk.FileChooserAction.OPEN,
+                                        None, None)
+        for name, exts in (("Spreadsheets and CSV", datafile.EXTENSIONS),
+                           ("CSV files", (".csv", ".tsv", ".txt")),
+                           ("Excel (.xlsx)", (".xlsx", ".xlsm")),
+                           ("LibreOffice / OpenOffice (.ods)", (".ods",))):
+            f = Gtk.FileFilter()
+            f.set_name(name)
+            for ext in exts:
+                f.add_pattern("*" + ext)
+                f.add_pattern("*" + ext.upper())
+            dlg.add_filter(f)
         self._set_dialog_folder(dlg)
         if dlg.run() != Gtk.ResponseType.ACCEPT:
             return
         path = dlg.get_filename()
         try:
-            with open(path, newline="", encoding="utf-8-sig") as fh:
-                sample = fh.read(4096)
-                fh.seek(0)
-                try:
-                    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-                except csv.Error:
-                    dialect = csv.excel
-                rows = list(csv.DictReader(fh, dialect=dialect))
-        except (OSError, UnicodeDecodeError, csv.Error) as e:
-            self.error("Could not read CSV", str(e))
+            rows = datafile.read_rows(path)
+        except datafile.DataFileError as e:
+            self.error("Could not read the file", str(e))
             return
         if not rows:
-            self.error("Nothing to print", "The CSV file has no data rows.")
+            self.error("Nothing to print", "The file has no data rows below its headers.")
             return
         needed = self.label.manual_variables()
         cols = [c for c in rows[0].keys() if c]
@@ -2396,12 +2396,13 @@ class Window(Gtk.ApplicationWindow):
                   f"({self.printer.describe()}).\n"
                   f"Columns: {', '.join(cols)}")
         if missing:
-            detail += ("\n\nNot in the CSV (the values from the Label tab are used): "
+            detail += ("\n\nNot in the file (the values from the Label tab are used): "
                        + ", ".join(missing))
         if not self.ask(f"Print {len(rows) * copies} labels?", detail, "Print"):
             return
         merged = [{**self.values, **{k: (v or "") for k, v in r.items() if k}} for r in rows]
-        if self._send(zpl.batch_zpl(self.label, merged), f"{len(rows)} labels from CSV"):
+        if self._send(zpl.batch_zpl(self.label, merged),
+                      f"{len(rows)} labels from {os.path.basename(path)}"):
             self._advance_counter(zpl.labels_printed(self.label, len(rows)))
 
     def _advance_counter(self, printed: int):

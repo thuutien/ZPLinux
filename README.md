@@ -59,7 +59,7 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
   600 dpi; label size presets (4×6, 4×2, 2×1 in…)
 - Live ZPL view with copy and export
 - **Variables**: type `{name}` in any text, barcode or QR field, fill it in on
-  the Label tab, or **print a batch from a CSV file** whose column headers match
+  the Label tab, or **print a batch from a CSV, Excel (.xlsx) or LibreOffice (.ods) file** whose column headers match
 - **Date, time and counter**: `{date}`, `{time}` and `{counter}` fill in when the
   label prints (formats, start, step and zero padding on the Label tab); the
   counter goes up for every label, copies and CSV batches included
