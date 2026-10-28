@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import datetime
 import json
 import os
 import shutil
@@ -27,7 +28,8 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 from . import (APP_ID, APP_NAME, __version__, printing, render, updater, zpl,  # noqa: E402
                zpl_import)
 from .canvas import LabelCanvas  # noqa: E402
-from .model import (DPI_CHOICES, KIND_NAMES, MM_PER_INCH, UNITS, BarcodeElement,  # noqa: E402
+from .model import (DATE_FORMATS, DPI_CHOICES, KIND_NAMES, MM_PER_INCH,  # noqa: E402
+                    TIME_FORMATS, UNITS, BarcodeElement,
                     BoxElement, Code128Element, EllipseElement, Element, ImageElement, Label,
                     QRElement, TextElement, describe, dpmm, element_from_dict, to_unit, turn)
 from . import symbology, zint  # noqa: E402
@@ -1768,6 +1770,19 @@ class Window(Gtk.ApplicationWindow):
         form.spin("Darkness adjust", p, "darkness", -30, 30)
         form.hint("0 keeps the printer's own darkness setting.")
 
+        form.section("Date, time and counter")
+        form.hint("Type {date}, {time} or {counter} in any text or barcode. They are "
+                  "filled in when the label prints; the counter goes up by one step "
+                  "for every label.")
+        now = datetime.datetime.now()
+        form.combo("Date", p, "date_format",
+                   [(f, now.strftime(f)) for f, _ex in DATE_FORMATS])
+        form.combo("Time", p, "time_format",
+                   [(f, now.strftime(f)) for f, _ex in TIME_FORMATS])
+        self.counter_spin = form.spin("Next number", p, "counter_next", -999999, 99999999)
+        form.spin("Step", p, "counter_step", 1, 1000)
+        form.spin("Digits (pad with zeros)", p, "counter_digits", 0, 12)
+
         form.section("Variables")
         self.vars_grid = Gtk.Grid(column_spacing=10, row_spacing=8)
         form.widget(self.vars_grid)
@@ -1783,7 +1798,7 @@ class Window(Gtk.ApplicationWindow):
         grid = getattr(self, "vars_grid", None)
         if grid is None:
             return
-        names = self.label.variables()
+        names = self.label.manual_variables()
         if self._shown_vars == names:
             return
         self._shown_vars = names
@@ -1996,13 +2011,14 @@ class Window(Gtk.ApplicationWindow):
     # ---- printing -----------------------------------------------------------
 
     def print_label(self):
-        missing = [v for v in self.label.variables() if not self.values.get(v)]
+        missing = [v for v in self.label.manual_variables() if not self.values.get(v)]
         if missing and not self.ask("Some variables are empty",
                                     f"{', '.join(missing)} will print as written. Print anyway?",
                                     "Print"):
             return
         n = self.label.copies
-        self._send(self.current_zpl(), f"{n} label{'s' if n != 1 else ''}")
+        if self._send(self.current_zpl(), f"{n} label{'s' if n != 1 else ''}"):
+            self._advance_counter(zpl.labels_printed(self.label))
 
     def print_csv(self):
         dlg = Gtk.FileChooserNative.new("Print from CSV", self, Gtk.FileChooserAction.OPEN, None, None)
@@ -2030,7 +2046,7 @@ class Window(Gtk.ApplicationWindow):
         if not rows:
             self.error("Nothing to print", "The CSV file has no data rows.")
             return
-        needed = self.label.variables()
+        needed = self.label.manual_variables()
         cols = [c for c in rows[0].keys() if c]
         missing = [v for v in needed if v not in cols]
         copies = self.label.copies
@@ -2044,14 +2060,26 @@ class Window(Gtk.ApplicationWindow):
         if not self.ask(f"Print {len(rows) * copies} labels?", detail, "Print"):
             return
         merged = [{**self.values, **{k: (v or "") for k, v in r.items() if k}} for r in rows]
-        self._send(zpl.batch_zpl(self.label, merged), f"{len(rows)} labels from CSV")
+        if self._send(zpl.batch_zpl(self.label, merged), f"{len(rows)} labels from CSV"):
+            self._advance_counter(zpl.labels_printed(self.label, len(rows)))
+
+    def _advance_counter(self, printed: int):
+        """After printing, {counter} carries on from the next number."""
+        lab = self.label
+        if not lab.uses_counter():
+            return
+        lab.counter_next += printed * lab.counter_step
+        if getattr(self, "counter_spin", None) is not None:
+            self.counter_spin.set_value(lab.counter_next)
+        self.mark_dirty()
 
     def _send(self, data: str, what: str):
+        """Send a print job; True when it went out."""
         cfg = self.printer
         if cfg.method == "file" and not cfg.file_path:
             path = self.choose_save("Save Print Job", "job.zpl", ("ZPL files", "*.zpl"))
             if not path:
-                return
+                return False
             cfg = printing.PrinterConfig(name=cfg.name, method="file", file_path=path)
         try:
             where = printing.send(data, cfg)
@@ -2061,11 +2089,12 @@ class Window(Gtk.ApplicationWindow):
                 hint = ("\n\nTesting without a printer? Start the fake printer first:\n"
                         + FAKE_PRINTER_CMD)
             self.error("Printing failed", str(e) + hint)
-            return
+            return False
         except OSError as e:
             self.error("Printing failed", str(e))
-            return
+            return False
         self.notify(f"Sent {what} to {cfg.title()} ({where})")
+        return True
 
     def printer_dialog(self):
         dlg = Gtk.Dialog(title="Printers", transient_for=self, modal=True, use_header_bar=True)

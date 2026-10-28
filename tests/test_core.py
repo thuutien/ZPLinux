@@ -101,6 +101,50 @@ class RenameTests(unittest.TestCase):
             Label.from_json('{"format": "something else"}')
 
 
+class AutoFieldTests(unittest.TestCase):
+    def lab(self, text, **kw):
+        return Label(elements=[TextElement(text=text)], **kw)
+
+    def test_date_and_time(self):
+        import datetime
+        lab = self.lab("{date} {time}", date_format="%Y-%m-%d", time_format="%H:%M")
+        when = datetime.datetime(2026, 2, 11, 9, 40, 25)
+        self.assertEqual(lab.auto_values(now=when)["date"], "2026-02-11")
+        self.assertEqual(lab.auto_values(now=when)["time"], "09:40")
+        self.assertEqual(lab.manual_variables(), [])
+
+    def test_counter_padding_and_step(self):
+        lab = self.lab("#{counter}", counter_next=7, counter_step=5, counter_digits=4)
+        self.assertEqual(lab.filled({}).elements[0].text, "#0007")
+        self.assertEqual(lab.filled({}, offset=2).elements[0].text, "#0017")
+
+    def test_each_copy_gets_its_own_number(self):
+        out = zpl.label_zpl(self.lab("#{counter}", counter_next=7, copies=3))
+        self.assertEqual(out.count("^XA"), 3)
+        for n in (7, 8, 9):
+            self.assertIn(f"^FD#{n}^FS", out)
+        self.assertNotIn("^PQ", out)
+
+    def test_copies_without_a_counter_use_pq(self):
+        out = zpl.label_zpl(self.lab("Hi", copies=3))
+        self.assertEqual(out.count("^XA"), 1)
+        self.assertIn("^PQ3", out)
+
+    def test_batch_carries_the_counter_on(self):
+        lab = self.lab("{name} #{counter}", counter_next=1, copies=2)
+        out = zpl.batch_zpl(lab, [{"name": "A"}, {"name": "B"}])
+        for text in ("A #1", "A #2", "B #3", "B #4"):
+            self.assertIn(f"^FD{text}^FS", out)
+        self.assertEqual(zpl.labels_printed(lab, 2), 4)
+        self.assertEqual(lab.manual_variables(), ["name"])
+
+    def test_settings_are_saved(self):
+        lab = self.lab("x", date_format="%m/%d/%Y", counter_next=42, counter_digits=3)
+        back = Label.from_json(lab.to_json())
+        self.assertEqual((back.date_format, back.counter_next, back.counter_digits),
+                         ("%m/%d/%Y", 42, 3))
+
+
 class RotationTests(unittest.TestCase):
     def test_rotate_rect(self):
         # a 10 x 4 rect at the top-left of a 100 x 50 area

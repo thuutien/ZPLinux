@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import datetime
 import json
 import re
 from dataclasses import asdict, dataclass, field, fields
@@ -309,6 +310,15 @@ def element_from_dict(d: dict) -> Element:
     return cls(**{k: v for k, v in d.items() if k in names})
 
 
+# Fields filled in when printing: type {date}, {time} or {counter} in any text or barcode.
+AUTO_FIELDS = ("date", "time", "counter")
+# (strftime format, how it reads)
+DATE_FORMATS = (("%d/%m/%Y", "31/12/2026"), ("%m/%d/%Y", "12/31/2026"),
+                ("%Y-%m-%d", "2026-12-31"), ("%d.%m.%Y", "31.12.2026"),
+                ("%d %b %Y", "31 Dec 2026"))
+TIME_FORMATS = (("%H:%M:%S", "23:59:59"), ("%H:%M", "23:59"), ("%I:%M %p", "11:59 PM"))
+
+
 @dataclass
 class Label:
     width_mm: float = 101.6   # 4 x 6 inch shipping label by default
@@ -321,6 +331,12 @@ class Label:
     # example a 6 x 4 in landscape design printed on 4 x 6 in labels. width_mm and
     # height_mm are the design's; the stock is the other way round at 90 and 270.
     orientation: int = 0
+    # Automatic fields
+    date_format: str = "%d/%m/%Y"
+    time_format: str = "%H:%M:%S"
+    counter_next: int = 1     # the number the next printed label gets
+    counter_step: int = 1
+    counter_digits: int = 0   # pad with zeros to this many digits; 0 = no padding
 
     @property
     def width_dots(self) -> int:
@@ -359,11 +375,26 @@ class Label:
                         seen.append(var)
         return seen
 
-    def filled(self, values: Optional[Dict[str, str]]) -> "Label":
-        """A copy with {variables} replaced. Unknown variables are left as they are."""
+    def manual_variables(self) -> List[str]:
+        """The variables the user fills in (not {date}, {time} or {counter})."""
+        return [v for v in self.variables() if v not in AUTO_FIELDS]
+
+    def uses_counter(self) -> bool:
+        return "counter" in self.variables()
+
+    def auto_values(self, offset: int = 0, now: Optional[datetime.datetime] = None) -> dict:
+        """{date}, {time} and {counter} for the label printed offset labels after the
+        next one."""
+        now = now or datetime.datetime.now()
+        n = self.counter_next + offset * self.counter_step
+        return {"date": now.strftime(self.date_format), "time": now.strftime(self.time_format),
+                "counter": str(n).zfill(self.counter_digits) if n >= 0 else str(n)}
+
+    def filled(self, values: Optional[Dict[str, str]], offset: int = 0) -> "Label":
+        """A copy with {variables} replaced, {date}, {time} and {counter} included (the
+        counter offset labels on). Unknown variables are left as they are."""
         out = copy.deepcopy(self)
-        if not values:
-            return out
+        values = {**(values or {}), **self.auto_values(offset)}
         for el in out.elements:
             for name in el.text_fields():
                 setattr(el, name, VAR_RE.sub(
@@ -380,6 +411,11 @@ class Label:
             "darkness": self.darkness,
             "copies": self.copies,
             "orientation": self.orientation,
+            "date_format": self.date_format,
+            "time_format": self.time_format,
+            "counter_next": self.counter_next,
+            "counter_step": self.counter_step,
+            "counter_digits": self.counter_digits,
             "elements": [e.to_dict() for e in self.elements],
         }
         for e in d["elements"]:
@@ -399,5 +435,10 @@ class Label:
             darkness=int(d.get("darkness", 0)),
             copies=int(d.get("copies", 1)),
             orientation=int(d.get("orientation", 0)) % 360,
+            date_format=str(d.get("date_format", "%d/%m/%Y")),
+            time_format=str(d.get("time_format", "%H:%M:%S")),
+            counter_next=int(d.get("counter_next", 1)),
+            counter_step=int(d.get("counter_step", 1)),
+            counter_digits=int(d.get("counter_digits", 0)),
             elements=[element_from_dict(e) for e in d.get("elements", [])],
         )
