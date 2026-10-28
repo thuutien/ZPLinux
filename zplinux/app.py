@@ -181,6 +181,24 @@ def scroll_into_view(scrolled: Gtk.ScrolledWindow, widget: Gtk.Widget) -> None:
         adj.set_value(min(adj.get_upper() - adj.get_page_size(), bottom - adj.get_page_size()))
 
 
+def check_printer(cfg) -> str:
+    """One line about a printer: what it is and whether it is ready (network and USB
+    printers say), or whether it can be reached."""
+    if cfg.method in ("network", "device"):
+        try:
+            info = printing.identify(cfg)
+            state = printing.status(cfg)
+        except printing.PrintError:
+            pass                       # it may not answer queries; fall back below
+        else:
+            mark = "✗" if state.blocking() else "✓"
+            return f"{mark} {info.describe()}. {state.describe()}."
+    try:
+        return "✓ " + printing.test(cfg)
+    except printing.PrintError as e:
+        return "✗ " + str(e)
+
+
 def barcode_type(el) -> str:
     """The Type list's id for a barcode or QR element."""
     if isinstance(el, Code128Element):
@@ -472,7 +490,7 @@ class Window(Gtk.ApplicationWindow):
         btns = Gtk.Box(spacing=6, homogeneous=True)
         change = Gtk.Button(label="Printers…")
         change.connect("clicked", lambda *_: (pop.popdown(), self.printer_dialog()))
-        test = Gtk.Button(label="Test Connection")
+        test = Gtk.Button(label="Check Printer")
         test.connect("clicked", lambda *_: self._test_printer())
         btns.pack_start(change, True, True, 0)
         btns.pack_start(test, True, True, 0)
@@ -481,6 +499,9 @@ class Window(Gtk.ApplicationWindow):
         csvb = Gtk.ModelButton(text="Print a Batch from CSV…")
         csvb.set_action_name("win.print-csv")
         box.pack_start(csvb, False, False, 0)
+        calib = Gtk.ModelButton(text="Calibrate Label Stock…")
+        calib.connect("clicked", lambda *_: self.calibrate_printer())
+        box.pack_start(calib, False, False, 0)
         box.show_all()
         pop.connect("show", lambda *_: self._update_printer_info())
         return pop
@@ -513,14 +534,68 @@ class Window(Gtk.ApplicationWindow):
         self._update_printer_info()
 
     def _test_printer(self):
-        try:
-            msg = "✓ " + printing.test(self.printer)
-        except printing.PrintError as e:
-            msg = "✗ " + str(e)
-            if self.printer.method == "network" and self.printer.host in ("127.0.0.1", "localhost"):
-                msg += f"\nNo printer yet? Run: {FAKE_PRINTER_CMD}"
+        msg = check_printer(self.printer)
+        if msg.startswith("✗") and self.printer.method == "network" and \
+                self.printer.host in ("127.0.0.1", "localhost"):
+            msg += f"\nNo printer yet? Run: {FAKE_PRINTER_CMD}"
         self.pp_result.set_text(msg)
         self.pp_result.show()
+
+    def calibrate_printer(self):
+        cfg = self.printer
+        if cfg.method == "file":
+            self.notify("Choose a printer first: this one saves to a file.")
+            return
+        if not self.ask(f"Calibrate {cfg.title()}?",
+                        "The printer feeds a few labels to measure the label stock. Do this "
+                        "after loading a different kind of label.", "Calibrate"):
+            return
+        try:
+            printing.calibrate(cfg)
+        except (printing.PrintError, OSError) as e:
+            self.error("Could not calibrate", str(e))
+            return
+        self.notify(f"{cfg.title()} is calibrating")
+
+    def _preflight(self, cfg) -> bool:
+        """Before printing to a network or USB printer, ask it what it is and how it
+        is; warn about what would spoil the print. True to go ahead. A printer that
+        doesn't answer is printed to anyway."""
+        if cfg.method not in ("network", "device"):
+            return True
+        try:
+            info = printing.identify(cfg, timeout=1.5)
+            state = printing.status(cfg, timeout=1.5)
+        except printing.PrintError:
+            return True
+        name = info.model or cfg.title()
+        if state.blocking():
+            problems = "; ".join(state.blocking())
+            if not self.ask(f"{name} can't print right now",
+                            f"It reports: {problems}. Fix that and print again, or send the "
+                            "job anyway; the printer prints it once it's fixed.",
+                            "Send Anyway"):
+                return False
+        lab = self.label
+        if info.dpi and info.dpi != lab.dpi:
+            if not self.ask(f"The {name} prints at {info.dpi} dpi",
+                            f"This label is set for {lab.dpi} dpi, so it would print "
+                            f"{'larger' if info.dpi < lab.dpi else 'smaller'} than designed. "
+                            f"Set Resolution on the Label tab to {info.dpi} dpi.",
+                            "Print Anyway"):
+                return False
+        width_mm = lab.stock_mm[0]
+        max_mm = info.max_width_dots / dpmm(info.dpi) if info.max_width_dots else 0
+        if max_mm and width_mm > max_mm + 0.5:
+            if not self.ask(f"The label is too wide for the {name}",
+                            f"The label prints {width_mm:.0f} mm wide, but the {name} prints "
+                            f"at most {max_mm:.0f} mm; the rest would be cut off. For a "
+                            "landscape design, try Rotate when printing on the Label tab.",
+                            "Print Anyway"):
+                return False
+        if state.paused:
+            self.notify(f"{name} is paused: the label prints when you resume it")
+        return True
 
     # ---- update bar ---------------------------------------------------------
 
@@ -2081,6 +2156,8 @@ class Window(Gtk.ApplicationWindow):
             if not path:
                 return False
             cfg = printing.PrinterConfig(name=cfg.name, method="file", file_path=path)
+        if not self._preflight(cfg):
+            return False
         try:
             where = printing.send(data, cfg)
         except printing.PrintError as e:
@@ -2185,7 +2262,7 @@ class Window(Gtk.ApplicationWindow):
         default = Gtk.CheckButton(label="Default printer")
         grid.attach(default, 0, 3, 2, 1)
         test_row = Gtk.Box(spacing=10)
-        test = Gtk.Button(label="Test Connection")
+        test = Gtk.Button(label="Check Printer")
         result = dim_label("")
         result.set_selectable(True)
         test_row.pack_start(test, False, False, 0)
@@ -2292,10 +2369,7 @@ class Window(Gtk.ApplicationWindow):
 
         def run_test():
             store()
-            try:
-                result.set_text("✓ " + printing.test(state.current))
-            except printing.PrintError as e:
-                result.set_text("✗ " + str(e))
+            result.set_text(check_printer(state.current))
 
         addb = icon_button("list-add-symbolic", "Add printer", add, flat=False)
         remove = icon_button("list-remove-symbolic", "Remove printer", delete, flat=False)

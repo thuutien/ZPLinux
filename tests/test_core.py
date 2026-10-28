@@ -342,6 +342,55 @@ class PrintingTests(unittest.TestCase):
             printing.send("^XA^XZ", printing.PrinterConfig(method="device", device="/nonexistent/lp9"))
 
 
+class PrinterQueryTests(unittest.TestCase):
+    HI = b"\x02GX420d-200dpi,ZSP-002098B,8,2104KB\x03\r\n"
+    HS = (b"\x02030,1,0,1235,000,0,0,0,000,0,0,0\x03\r\n"
+          b"\x02000,0,1,0,0,2,6,0,00000000,1,188\x03\r\n\x021234,0\x03\r\n")
+
+    def test_identify(self):
+        info = printing.parse_info(self.HI)
+        self.assertEqual((info.model, info.dpi, info.max_width_dots), ("GX420d", 203, 832))
+        self.assertIn("104 mm", info.describe())
+        unknown = printing.parse_info(b"\x02XYZ999-300dpi,V1,12,8MB\x03")
+        self.assertEqual((unknown.dpi, unknown.max_width_dots), (300, 0))
+
+    def test_status(self):
+        st = printing.parse_status(self.HS)
+        self.assertEqual((st.paper_out, st.paused, st.head_open), (True, False, True))
+        self.assertEqual(st.blocking(), ["out of labels", "the print head is open"])
+        ready = printing.parse_status(self.HS.replace(b"030,1,", b"030,0,")
+                                      .replace(b"000,0,1,", b"000,0,0,"))
+        self.assertEqual(ready.describe(), "Ready")
+
+    def test_fake_printer_answers(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "tools", "fake_printer.py")
+        proc = subprocess.Popen([sys.executable, script, "--port", str(port), "--state", "paused",
+                                 "--out", tempfile.mkdtemp()], stdout=subprocess.DEVNULL)
+        try:
+            cfg = printing.PrinterConfig(method="network", host="127.0.0.1", port=port)
+            for _ in range(50):
+                try:
+                    info = printing.identify(cfg)
+                    break
+                except printing.PrintError:
+                    time.sleep(0.1)
+            self.assertEqual((info.model, info.dpi), ("GK420d", 203))
+            st = printing.status(cfg)
+            self.assertTrue(st.paused)
+            self.assertEqual(st.blocking(), [])
+        finally:
+            proc.terminate()
+            proc.wait()
+
+    def test_cups_queues_cant_be_asked(self):
+        with self.assertRaises(printing.PrintError):
+            printing.query(printing.PrinterConfig(method="cups", cups_queue="x"), b"~HI")
+
+
 class SavedPrinterTests(unittest.TestCase):
     def test_nothing_saved_gives_local_test_printer(self):
         printers, default = printing.load_printers({})
