@@ -77,7 +77,7 @@ modules:
       - type: git
         url: https://github.com/thuutien/ZPLinux.git
         tag: v0.7.0
-        commit: COMMIT-OF-v0.7.0
+        commit: 3d6fa722f68124fd4ec8f0cdb738f640e930772d
         x-checker-data:
           type: git
           tag-pattern: '^v([\d.]+)$'
