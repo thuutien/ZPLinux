@@ -40,9 +40,10 @@ fi
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 
-install -d "$LIB/zplinux" "$SHARE/icons" "$(dirname "$BIN")"
+install -d "$LIB/zplinux" "$SHARE/icons/hicolor/scalable/actions" "$(dirname "$BIN")"
 install -m 644 "$SRC"/zplinux/*.py "$LIB/zplinux/"
-install -m 644 "$SRC"/data/icons/*.svg "$SHARE/icons/"
+# a theme layout: GTK 4 recolors symbolic icons (white on the blue bar) only there
+install -m 644 "$SRC"/data/icons/hicolor/scalable/actions/*.svg "$SHARE/icons/hicolor/scalable/actions/"
 sed "s|/usr/lib/zplinux|$PREFIX/lib/zplinux|" "$SRC/data/zplinux-launcher" > "$BIN"
 chmod 755 "$BIN"
 sed '1s|.*|#!/usr/bin/python3|' "$SRC/tools/fake_printer.py" > "$FAKE"
@@ -52,7 +53,9 @@ install -D -m 644 "$SRC/data/zplinux.svg" "$ICON"
 install -D -m 644 "$SRC/data/zplinux-mime.xml" "$MIME"
 
 if [ "$SYSTEM" = 1 ]; then
-    command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true
+    for c in gtk-update-icon-cache gtk4-update-icon-cache; do
+        command -v $c >/dev/null && { $c -q -t /usr/share/icons/hicolor || true; break; }
+    done
     command -v update-desktop-database >/dev/null && update-desktop-database -q /usr/share/applications || true
     command -v update-mime-database >/dev/null && update-mime-database /usr/share/mime || true
     echo "ZPLinux installed. Launch it from the menu (Office > ZPLinux) or run: zplinux"

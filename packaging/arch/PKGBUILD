@@ -2,11 +2,11 @@
 pkgname=zplinux
 pkgver=0.7.0
 pkgrel=1
-pkgdesc="Label designer for Zebra and other ZPL thermal printers (GTK3)"
+pkgdesc="Label designer for Zebra and other ZPL thermal printers (GTK 4)"
 arch=('any')
 url="https://github.com/thuutien/ZPLinux"
 license=('GPL-3.0-only')
-depends=('python' 'python-gobject' 'python-cairo' 'gtk3' 'pango')
+depends=('python' 'python-gobject' 'python-cairo' 'gtk4>=4.12' 'pango')
 conflicts=('labelix')
 replaces=('labelix')
 optdepends=('python-qrcode: draw QR codes in the preview'

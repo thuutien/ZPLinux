@@ -3,7 +3,7 @@
 [![Latest release](https://img.shields.io/github/v/release/thuutien/ZPLinux)](https://github.com/thuutien/ZPLinux/releases/latest)
 
 A WYSIWYG label designer for **Zebra and other ZPL thermal printers** on Linux,
-built with Python + GTK3. Zebra's own ZebraDesigner only runs on Windows;
+built with Python + GTK 4. Zebra's own ZebraDesigner only runs on Windows;
 ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 
 > ZPLinux was called **Labelix** up to version 0.4.2. Labelix can't update itself
@@ -86,15 +86,15 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 [releases page](https://github.com/thuutien/ZPLinux/releases/latest):
 
 ```bash
-sudo apt install ./zplinux_0.7.0_all.deb
+sudo apt install ./zplinux_0.8.0_all.deb
 ```
 
-**Flatpak (any distribution)**: download `zplinux-0.7.0.flatpak` from the
+**Flatpak (any distribution)**: download `zplinux-0.8.0.flatpak` from the
 releases page and install it for your user. Flatpak fetches the GNOME runtime
 from Flathub if you don't have it yet:
 
 ```bash
-flatpak install --user ./zplinux-0.7.0.flatpak
+flatpak install --user ./zplinux-0.8.0.flatpak
 ```
 
 The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`) and CUPS;
@@ -146,7 +146,8 @@ The PKGBUILD downloads `zplinux-<version>.tar.gz` from the GitHub release
 
 ## Run from source
 
-Needs Python 3, PyGObject and GTK 3 (preinstalled on most desktops).
+Needs Python 3, PyGObject and GTK 4.12 or newer (Linux Mint 22, Ubuntu 24.04,
+Debian 13, Fedora 39 and newer).
 Optional, for the preview only: `python3-qrcode` draws QR codes and `zint`
 draws the barcode types other than Code 128 and QR. Labels print the same
 without them.
@@ -161,9 +162,9 @@ Open the example: `python3 zplinux.py examples/product.zplinux`
 
 | Distribution | Command |
 | --- | --- |
-| Debian / Ubuntu / Mint | `sudo apt install python3-gi gir1.2-gtk-3.0 python3-qrcode zint` |
-| Fedora | `sudo dnf install python3-gobject gtk3 python3-qrcode zint` |
-| Arch / Manjaro | `sudo pacman -S python-gobject gtk3 python-qrcode zint` |
+| Debian / Ubuntu / Mint | `sudo apt install python3-gi gir1.2-gtk-4.0 python3-qrcode zint` |
+| Fedora | `sudo dnf install python3-gobject gtk4 python3-qrcode zint` |
+| Arch / Manjaro | `sudo pacman -S python-gobject gtk4 python-qrcode zint` |
 
 ## Testing without a printer
 
@@ -259,6 +260,6 @@ zplinux/updater.py   GitHub release check and self-update
 zplinux/canvas.py    design surface: selection, dragging, snapping
 zplinux/widgets.py   property cards, toasts, CSS
 zplinux/app.py       main window
-data/icons/          ZPLinux's own symbolic icons
+data/icons/          ZPLinux's own symbolic icons (hicolor/scalable/actions)
 tools/fake_printer.py  stand-in printer for testing
 ```

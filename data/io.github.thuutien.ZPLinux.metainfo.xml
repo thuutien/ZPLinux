@@ -57,6 +57,15 @@
     <mediatype>application/x-zplinux</mediatype>
   </provides>
   <releases>
+    <release version="0.8.0" date="2026-10-29">
+      <description>
+        <p>ZPLinux now uses GTK 4. It looks and works as before.</p>
+        <ul>
+          <li>Needs GTK 4.12 or newer when installed from the .deb or run from source (Linux Mint 22, Ubuntu 24.04, Debian 13, Fedora 39 or newer); the Flatpak works anywhere</li>
+          <li>Open and save use the new file chooser</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-10-28">
       <description>
         <ul>
