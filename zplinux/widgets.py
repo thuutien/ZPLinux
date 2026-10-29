@@ -569,6 +569,7 @@ class PropertyForm(Gtk.Box):
             self.first_input = w
 
     def _spin(self, text, obj, attr, lo, hi, step, digits, scale_in, scale_out):
+        notify = self.on_change      # the handler when this input was made
         adj = Gtk.Adjustment(value=scale_in(getattr(obj, attr)), lower=lo, upper=hi,
                              step_increment=step, page_increment=step * 10)
         sb = Gtk.SpinButton(adjustment=adj, digits=digits, numeric=True, width_chars=7)
@@ -577,7 +578,7 @@ class PropertyForm(Gtk.Box):
             if self.updating:
                 return
             setattr(obj, attr, scale_out(w.get_value()))
-            self.on_change(attr)
+            notify(attr)
         sb.connect("value-changed", changed)
         self.spins[attr] = (sb, obj, scale_in)
         self._attach(text, sb)
@@ -599,17 +600,19 @@ class PropertyForm(Gtk.Box):
                           lambda v: max(lo_dots, from_unit(v, self.unit, self.dpi)))
 
     def entry(self, text, obj, attr, placeholder=""):
+        notify = self.on_change      # the handler when this input was made
         e = Gtk.Entry(text=getattr(obj, attr), placeholder_text=placeholder)
 
         def changed(w):
             setattr(obj, attr, w.get_text())
-            self.on_change(attr)
+            notify(attr)
         e.connect("changed", changed)
         self._input(e)
         self._attach(text, e)
         return e
 
     def textarea(self, text, obj, attr):
+        notify = self.on_change      # the handler when this input was made
         tv = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, top_margin=6, bottom_margin=6,
                           left_margin=6, right_margin=6)
         tv.get_buffer().set_text(getattr(obj, attr))
@@ -618,7 +621,7 @@ class PropertyForm(Gtk.Box):
 
         def changed(buf):
             setattr(obj, attr, buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False))
-            self.on_change(attr)
+            notify(attr)
         tv.get_buffer().connect("changed", changed)
         self._input(tv)
         if text:
@@ -628,30 +631,33 @@ class PropertyForm(Gtk.Box):
         return tv
 
     def switch(self, text, obj, attr):
+        notify = self.on_change      # the handler when this input was made
         sw = Gtk.Switch(active=getattr(obj, attr), halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
 
         def toggled(w, _p):
             setattr(obj, attr, w.get_active())
-            self.on_change(attr)
+            notify(attr)
         sw.connect("notify::active", toggled)
         self._attach(text, sw)
         return sw
 
     def combo(self, text, obj, attr, options):
         """options: list of (value, label)."""
+        notify = self.on_change      # the handler when this input was made
         c = Choice([(str(v), lab) for v, lab in options])
         c.set_active_id(str(getattr(obj, attr)))
 
         def changed(w):
             cur = getattr(obj, attr)
             setattr(obj, attr, type(cur)(w.get_active_id()))
-            self.on_change(attr)
+            notify(attr)
         c.connect("changed", changed)
         self._attach(text, c)
         return c
 
     def toggle_group(self, text, obj, attr, options):
         """A linked row of toggle buttons: options are (value, icon, tooltip)."""
+        notify = self.on_change      # the handler when this input was made
         box = Gtk.Box()
         box.add_css_class("linked")
         buttons = []
@@ -664,7 +670,7 @@ class PropertyForm(Gtk.Box):
                 b.set_active(v == value)
             self.updating = False
             setattr(obj, attr, value)
-            self.on_change(attr)
+            notify(attr)
         for value, icon, tip in options:
             b = Gtk.ToggleButton(icon_name=icon, hexpand=True)
             b.set_tooltip_text(tip)
