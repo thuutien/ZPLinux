@@ -1,6 +1,6 @@
 # Maintainer: Your Name <you@example.com>
 pkgname=zplinux
-pkgver=0.8.0
+pkgver=0.8.1
 pkgrel=1
 pkgdesc="Label designer for Zebra and other ZPL thermal printers (GTK 4)"
 arch=('any')
@@ -15,7 +15,7 @@ optdepends=('python-qrcode: draw QR codes in the preview'
             'cups: print through a raw CUPS queue'
             'polkit: install updates from inside the app')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/thuutien/ZPLinux/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('b7538def7a9420b29446b56fd800b59493cad692248c25216b852de62cae6d43')
+sha256sums=('ce390bf69965ff9f040405ca360bce425b823ba6cb9eb44cd7a22df0ef23454e')
 
 package() {
   cd "$pkgname-$pkgver"
