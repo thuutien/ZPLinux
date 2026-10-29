@@ -1,4 +1,4 @@
-"""ZPLinux GTK3 user interface: a WYSIWYG designer for ZPL labels."""
+"""ZPLinux GTK 4 user interface: a WYSIWYG designer for ZPL labels."""
 
 from __future__ import annotations
 
@@ -17,12 +17,11 @@ import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Callable, List, Optional
-from urllib.parse import unquote, urlparse
 
 import gi
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
@@ -35,7 +34,10 @@ from .model import (BITMAP_FONTS, DATE_FORMATS, DPI_CHOICES, KIND_NAMES,  # noqa
                     QRElement, TextElement, describe, dpmm, element_from_dict, to_unit, turn)
 from . import datafile, symbology, zint  # noqa: E402
 from .templates import TEMPLATES  # noqa: E402
-from .widgets import CSS, PropertyForm, Toast, dim_label, icon_button  # noqa: E402
+from .widgets import (CSS, Choice, Dialog, PropertyForm, Toast, alert,  # noqa: E402
+                      choose_open, clear, dim_label, entry_with_choices, icon, icon_button,
+                      margins, menu_item, open_uri, pack, pack_end, popup_menu, rows)
+from . import widgets  # noqa: E402
 
 SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "zplinux", "settings.json")
 # ZPLinux was called Labelix; its settings (printers, recent files) are copied over once,
@@ -175,10 +177,10 @@ def scroll_into_view(scrolled: Gtk.ScrolledWindow, widget: Gtk.Widget) -> None:
     content = scrolled.get_child()
     if isinstance(content, Gtk.Viewport):
         content = content.get_child()
-    pos = widget.translate_coordinates(content, 0, 0)
+    pos = widget.translate_coordinates(content, 0, 0)   # (x, y), or None
     if not pos:
         return
-    top, bottom = pos[1] - 8, pos[1] + widget.get_allocated_height() + 8
+    top, bottom = pos[-1] - 8, pos[-1] + widget.get_height() + 8
     adj = scrolled.get_vadjustment()
     if top < adj.get_value():
         adj.set_value(max(adj.get_lower(), top))
@@ -213,9 +215,9 @@ def barcode_type(el) -> str:
     return el.symbology
 
 
-def file_paths(data) -> List[str]:
-    return [unquote(urlparse(u).path) for u in (data.get_uris() or [])
-            if urlparse(u).scheme == "file"]
+def file_paths(files) -> List[str]:
+    """Paths of the files in a drop (a Gdk.FileList)."""
+    return [f.get_path() for f in files.get_files() if f.get_path()]
 
 
 @dataclass(eq=False)          # each open document is its own tab, even if two look alike
@@ -276,36 +278,39 @@ class Window(Gtk.ApplicationWindow):
         self._syncing_layers = False
         self._layers_sig = None
         self._pending = set()
+        self._fitting: Optional[Document] = None   # waiting to be fitted to the window
 
         css = Gtk.CssProvider()
-        css.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css,
-                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        css.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self._build_actions(app)
         self._build_header()
 
         overlay = Gtk.Overlay()
-        self.add(overlay)
+        self.set_child(overlay)
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        overlay.add(root)
+        overlay.set_child(root)
         self.toast = Toast()
         overlay.add_overlay(self.toast)
         self._build_update_bar(root)
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
-        root.pack_start(self.stack, True, True, 0)
+        pack(root, self.stack, True, True, 0)
         self.stack.add_named(self._build_welcome(), "welcome")
         self.stack.add_named(self._build_editor(), "editor")
 
-        self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY)
-        self.drag_dest_add_uri_targets()
-        self.connect("drag-data-received", lambda _w, _c, _x, _y, data, _i, _t:
-                     self.drop_files(file_paths(data)))
-        self.connect("key-press-event", self.on_key)
-        self.connect("delete-event", self.on_delete_event)
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop.connect("drop", lambda _t, files, _x, _y: self.drop_files(file_paths(files)) or True)
+        self.add_controller(drop)
+        # Before the focused widget, as GTK 3's key-press-event on the window was
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", lambda c, keyval, _code, state: self.on_key(
+            self, SimpleNamespace(keyval=keyval, state=state)))
+        self.add_controller(keys)
+        self.connect("close-request", self.on_delete_event)
 
-        self.show_all()
         self.toast.set_reveal_child(False)
-        self.tabs.hide()
+        self.tabs.set_visible(False)
         if path:
             self.open_path(path)
         else:
@@ -395,44 +400,51 @@ class Window(Gtk.ApplicationWindow):
     # ---- header -------------------------------------------------------------
 
     def _build_header(self):
-        hb = Gtk.HeaderBar(show_close_button=True, title=APP_NAME)
-        hb.get_style_context().add_class("accent-bar")
+        hb = Gtk.HeaderBar()
+        hb.add_css_class("accent-bar")
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        title = Gtk.Label(label=APP_NAME, ellipsize=Pango.EllipsizeMode.END)
+        title.add_css_class("title")
+        self.subtitle = Gtk.Label(ellipsize=Pango.EllipsizeMode.MIDDLE, visible=False)
+        self.subtitle.add_css_class("subtitle")
+        titles.append(title)
+        titles.append(self.subtitle)
+        hb.set_title_widget(titles)
         self.set_titlebar(hb)
         self.header = hb
 
         def action_button(icon, tip, action):
-            b = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
+            b = Gtk.Button.new_from_icon_name(icon)
             b.set_tooltip_text(tip)
             b.set_action_name(action)
             return b
 
-        self.back_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.BUTTON)
+        self.back_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic")
         self.back_btn.set_tooltip_text("Back to the open labels (Esc)")
         self.back_btn.connect("clicked", lambda *_: self.show_editor())
-        self.back_btn.set_no_show_all(True)
+        self.back_btn.set_visible(False)
         hb.pack_start(self.back_btn)
         hb.pack_start(action_button("document-new-symbolic", "New label (Ctrl+N)", "win.new"))
         hb.pack_start(action_button("document-open-symbolic", "Open (Ctrl+O)", "win.open"))
         hist = Gtk.Box()
-        hist.get_style_context().add_class("linked")
-        hist.pack_start(action_button("edit-undo-symbolic", "Undo (Ctrl+Z)", "win.undo"),
+        hist.add_css_class("linked")
+        pack(hist, action_button("edit-undo-symbolic", "Undo (Ctrl+Z)", "win.undo"),
                         False, False, 0)
-        hist.pack_start(action_button("edit-redo-symbolic", "Redo (Ctrl+Shift+Z)", "win.redo"),
+        pack(hist, action_button("edit-redo-symbolic", "Redo (Ctrl+Shift+Z)", "win.redo"),
                         False, False, 0)
         hb.pack_start(hist)
         self.hist_box = hist
         # Grid and snapping, at hand while designing (the same toggles as Ctrl+' etc.)
         view = Gtk.Box()
-        view.get_style_context().add_class("linked")
+        view.add_css_class("linked")
         for icon, tip, action in (
                 ("zplinux-grid-symbolic", "Show grid (Ctrl+')", "win.show-grid"),
                 ("zplinux-snap-symbolic", "Snap to edges, centres and other objects "
                                           "(hold Alt to place freely)", "win.snap")):
-            b = Gtk.ToggleButton()
-            b.add(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+            b = Gtk.ToggleButton(icon_name=icon)
             b.set_tooltip_text(tip)
             b.set_action_name(action)
-            view.pack_start(b, False, False, 0)
+            pack(view, b, False, False, 0)
         hb.pack_start(view)
         self.view_box = view
 
@@ -452,30 +464,28 @@ class Window(Gtk.ApplicationWindow):
                     continue
                 sec.append(text, action)
             menu.append_section(None, sec)
-        mb = Gtk.MenuButton(menu_model=menu, use_popover=True)
-        mb.add(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
+        mb = Gtk.MenuButton(menu_model=menu, icon_name="open-menu-symbolic")
         mb.set_tooltip_text("Main menu")
         hb.pack_end(mb)
 
         # Print, with a popover for choosing the printer
         pbox = Gtk.Box()
-        pbox.get_style_context().add_class("linked")
+        pbox.add_css_class("linked")
         pb = Gtk.Button()
         inner = Gtk.Box(spacing=6)
-        inner.pack_start(Gtk.Image.new_from_icon_name("printer-symbolic", Gtk.IconSize.BUTTON),
+        pack(inner, Gtk.Image.new_from_icon_name("printer-symbolic"),
                          False, False, 0)
-        inner.pack_start(Gtk.Label(label="Print"), False, False, 0)
-        pb.add(inner)
-        pb.get_style_context().add_class("suggested-action")
+        pack(inner, Gtk.Label(label="Print"), False, False, 0)
+        pb.set_child(inner)
+        pb.add_css_class("suggested-action")
         pb.set_tooltip_text("Print this label (Ctrl+P)")
         pb.set_action_name("win.print")
-        pbox.pack_start(pb, False, False, 0)
-        pm = Gtk.MenuButton()
-        pm.get_style_context().add_class("suggested-action")
-        pm.add(Gtk.Image.new_from_icon_name("pan-down-symbolic", Gtk.IconSize.BUTTON))
+        pack(pbox, pb, False, False, 0)
+        pm = Gtk.MenuButton(icon_name="pan-down-symbolic")
+        pm.add_css_class("suggested-action")
         pm.set_tooltip_text("Choose printer")
         pm.set_popover(self._build_print_popover())
-        pbox.pack_start(pm, False, False, 0)
+        pack(pbox, pm, False, False, 0)
         hb.pack_end(pbox)
         self.print_box = pbox
 
@@ -486,61 +496,55 @@ class Window(Gtk.ApplicationWindow):
 
     def _build_print_popover(self) -> Gtk.Popover:
         pop = Gtk.Popover()
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
+        box = margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), 12)
         box.set_size_request(300, -1)
-        pop.add(box)
+        pop.set_child(box)
         t = Gtk.Label(label="Print to", xalign=0)
-        t.get_style_context().add_class("card-title")
-        box.pack_start(t, False, False, 0)
+        t.add_css_class("card-title")
+        pack(box, t, False, False, 0)
         self.pp_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.pp_list.get_style_context().add_class("card")
+        self.pp_list.add_css_class("card")
         self.pp_list.connect("row-activated", self._on_printer_row)
-        box.pack_start(self.pp_list, False, False, 0)
+        pack(box, self.pp_list, False, False, 0)
         self.pp_result = dim_label("")
         self.pp_result.set_selectable(True)
-        self.pp_result.set_no_show_all(True)
-        box.pack_start(self.pp_result, False, False, 0)
+        self.pp_result.set_visible(False)
+        pack(box, self.pp_result, False, False, 0)
         btns = Gtk.Box(spacing=6, homogeneous=True)
         change = Gtk.Button(label="Printers…")
         change.connect("clicked", lambda *_: (pop.popdown(), self.printer_dialog()))
         test = Gtk.Button(label="Check Printer")
         test.connect("clicked", lambda *_: self._test_printer())
-        btns.pack_start(change, True, True, 0)
-        btns.pack_start(test, True, True, 0)
-        box.pack_start(btns, False, False, 0)
-        box.pack_start(Gtk.Separator(), False, False, 2)
-        csvb = Gtk.ModelButton(text="Print a Batch from a File…")
-        csvb.set_action_name("win.print-csv")
-        box.pack_start(csvb, False, False, 0)
-        calib = Gtk.ModelButton(text="Calibrate Label Stock…")
-        calib.connect("clicked", lambda *_: self.calibrate_printer())
-        box.pack_start(calib, False, False, 0)
-        box.show_all()
+        pack(btns, change, True, True, 0)
+        pack(btns, test, True, True, 0)
+        pack(box, btns, False, False, 0)
+        pack(box, Gtk.Separator(), False, False, 2)
+        pack(box, menu_item("Print a Batch from a File…",
+                            lambda: (pop.popdown(), self.print_csv())), False, False, 0)
+        pack(box, menu_item("Calibrate Label Stock…",
+                            lambda: (pop.popdown(), self.calibrate_printer())), False, False, 0)
         pop.connect("show", lambda *_: self._update_printer_info())
         return pop
 
     def _update_printer_info(self):
-        for row in self.pp_list.get_children():
-            self.pp_list.remove(row)
+        clear(self.pp_list)
         for i, cfg in enumerate(self.printers):
             row = Gtk.ListBoxRow()
             row.printer = cfg
-            hbox = Gtk.Box(spacing=10, margin=8)
-            hbox.pack_start(Gtk.Image.new_from_icon_name(PRINTER_ICONS[cfg.method],
-                                                         Gtk.IconSize.DND), False, False, 0)
+            hbox = margins(Gtk.Box(spacing=10), 8)
+            pack(hbox, icon(PRINTER_ICONS[cfg.method], 32), False, False, 0)
             col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
             name = Gtk.Label(label=cfg.title(), xalign=0, ellipsize=Pango.EllipsizeMode.END)
-            col.pack_start(name, False, False, 0)
+            pack(col, name, False, False, 0)
             sub = cfg.describe() + (" · Default" if i == self.default_printer else "")
-            col.pack_start(dim_label(sub, wrap=False), False, False, 0)
-            hbox.pack_start(col, True, True, 0)
-            check = Gtk.Image.new_from_icon_name("object-select-symbolic", Gtk.IconSize.BUTTON)
+            pack(col, dim_label(sub, wrap=False), False, False, 0)
+            pack(hbox, col, True, True, 0)
+            check = Gtk.Image.new_from_icon_name("object-select-symbolic")
             check.set_opacity(1 if cfg is self.printer else 0)
-            hbox.pack_end(check, False, False, 0)
-            row.add(hbox)
-            self.pp_list.add(row)
-        self.pp_list.show_all()
-        self.pp_result.hide()
+            pack_end(hbox, check, False, False, 0)
+            row.set_child(hbox)
+            self.pp_list.append(row)
+        self.pp_result.set_visible(False)
 
     def _on_printer_row(self, lb, row):
         self.printer = row.printer
@@ -552,7 +556,7 @@ class Window(Gtk.ApplicationWindow):
                 self.printer.host in ("127.0.0.1", "localhost"):
             msg += f"\nNo printer yet? Run: {FAKE_PRINTER_CMD}"
         self.pp_result.set_text(msg)
-        self.pp_result.show()
+        self.pp_result.set_visible(True)
 
     def calibrate_printer(self):
         cfg = self.printer
@@ -613,28 +617,32 @@ class Window(Gtk.ApplicationWindow):
     # ---- update bar ---------------------------------------------------------
 
     def _build_update_bar(self, root):
-        bar = Gtk.InfoBar(message_type=Gtk.MessageType.INFO, show_close_button=True)
-        area = bar.get_content_area()
-        area.pack_start(Gtk.Image.new_from_icon_name("software-update-available-symbolic",
-                                                     Gtk.IconSize.BUTTON), False, False, 0)
+        bar = Gtk.Box(spacing=8)
+        bar.add_css_class("update-bar")
+        pack(bar, Gtk.Image.new_from_icon_name("software-update-available-symbolic"), False, False, 0)
         self.update_text = Gtk.Label(xalign=0, wrap=True)
-        area.pack_start(self.update_text, True, True, 0)
-        self.update_notes_btn = bar.add_button("What's New", 1)
-        self.update_install_btn = bar.add_button("Install", 2)
-        self.update_install_btn.get_style_context().add_class("suggested-action")
-        self.update_restart_btn = bar.add_button("Restart Now", 3)
-        self.update_restart_btn.get_style_context().add_class("suggested-action")
-        bar.connect("response", self._on_update_bar)
-        bar.set_no_show_all(True)
-        area.show_all()
+        pack(bar, self.update_text, True, True, 0)
+        buttons = []
+        for text, resp in (("What's New", 1), ("Install", 2), ("Restart Now", 3)):
+            b = Gtk.Button(label=text, valign=Gtk.Align.CENTER)
+            b.connect("clicked", lambda _b, r=resp: self._on_update_bar(bar, r))
+            pack(bar, b, False, False, 0)
+            buttons.append(b)
+        self.update_notes_btn, self.update_install_btn, self.update_restart_btn = buttons
+        self.update_install_btn.add_css_class("suggested-action")
+        self.update_restart_btn.add_css_class("suggested-action")
+        pack(bar, icon_button("window-close-symbolic", "Close",
+                              lambda: self._on_update_bar(bar, Gtk.ResponseType.CLOSE)),
+             False, False, 0)
+        bar.set_visible(False)
         self.update_bar = bar
-        root.pack_start(bar, False, False, 0)
+        pack(root, bar, False, False, 0)
 
     def _on_update_bar(self, bar, resp):
         if resp == Gtk.ResponseType.CLOSE:
-            bar.hide()
+            bar.set_visible(False)
         elif resp == 1 and self.latest:
-            Gtk.show_uri_on_window(self, self.latest.url, Gdk.CURRENT_TIME)
+            open_uri(self, self.latest.url)
         elif resp == 2:
             self.install_update()
         elif resp == 3:
@@ -647,67 +655,66 @@ class Window(Gtk.ApplicationWindow):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER,
                         margin_top=36, margin_bottom=36, margin_start=24, margin_end=24, spacing=10)
         outer.set_size_request(940, -1)
-        scroll.add(outer)
+        scroll.set_child(outer)
 
         hero = Gtk.Box(spacing=16, halign=Gtk.Align.START)
-        logo = Gtk.Image.new_from_icon_name("zplinux", Gtk.IconSize.DIALOG)
-        logo.set_pixel_size(64)
-        hero.pack_start(logo, False, False, 0)
+        logo = icon("zplinux", 64)
+        pack(hero, logo, False, False, 0)
         tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, spacing=2)
         title = Gtk.Label(label=APP_NAME, xalign=0)
-        title.get_style_context().add_class("welcome-title")
+        title.add_css_class("welcome-title")
         sub = Gtk.Label(label="Design and print labels for Zebra and other ZPL printers.", xalign=0)
-        sub.get_style_context().add_class("welcome-sub")
-        tb.pack_start(title, False, False, 0)
-        tb.pack_start(sub, False, False, 0)
-        hero.pack_start(tb, False, False, 0)
-        outer.pack_start(hero, False, False, 12)
+        sub.add_css_class("welcome-sub")
+        pack(tb, title, False, False, 0)
+        pack(tb, sub, False, False, 0)
+        pack(hero, tb, False, False, 0)
+        pack(outer, hero, False, False, 12)
 
         head = Gtk.Label(label="Start a new label", xalign=0)
-        head.get_style_context().add_class("sidebar-title")
-        outer.pack_start(head, False, False, 0)
+        head.add_css_class("sidebar-title")
+        pack(outer, head, False, False, 0)
         flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                            min_children_per_line=2, max_children_per_line=5,
                            column_spacing=12, row_spacing=12)
         for _tid, name, size, factory in TEMPLATES:
-            flow.add(self._template_card(name, size, factory))
-        flow.add(self._custom_card())
-        outer.pack_start(flow, False, False, 0)
+            flow.append(self._template_card(name, size, factory))
+        flow.append(self._custom_card())
+        pack(outer, flow, False, False, 0)
 
         self.user_head = Gtk.Label(label="Your templates", xalign=0)
-        self.user_head.get_style_context().add_class("sidebar-title")
-        self.user_head.set_no_show_all(True)
-        outer.pack_start(self.user_head, False, False, 6)
+        self.user_head.add_css_class("sidebar-title")
+        self.user_head.set_visible(False)
+        pack(outer, self.user_head, False, False, 6)
         self.user_flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                                      min_children_per_line=2, max_children_per_line=5,
                                      column_spacing=12, row_spacing=12)
-        self.user_flow.set_no_show_all(True)
-        outer.pack_start(self.user_flow, False, False, 0)
+        self.user_flow.set_visible(False)
+        pack(outer, self.user_flow, False, False, 0)
 
         self.recent_head = Gtk.Label(label="Recent", xalign=0)
-        self.recent_head.get_style_context().add_class("sidebar-title")
-        self.recent_head.set_no_show_all(True)
-        outer.pack_start(self.recent_head, False, False, 6)
+        self.recent_head.add_css_class("sidebar-title")
+        self.recent_head.set_visible(False)
+        pack(outer, self.recent_head, False, False, 6)
         self.recent_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.recent_list.get_style_context().add_class("card")
-        self.recent_list.set_no_show_all(True)
+        self.recent_list.add_css_class("card")
+        self.recent_list.set_visible(False)
         self.recent_list.connect("row-activated", lambda _l, row: self.open_path(row.path))
-        outer.pack_start(self.recent_list, False, False, 0)
+        pack(outer, self.recent_list, False, False, 0)
         openb = Gtk.Button(label="Open a Label…", halign=Gtk.Align.START)
         openb.set_action_name("win.open")
-        outer.pack_start(openb, False, False, 6)
+        pack(outer, openb, False, False, 6)
         return scroll
 
     def _card(self, picture: Gtk.Widget, name: str, sub: str, cb: Callable) -> Gtk.Widget:
         btn = Gtk.Button()
-        btn.get_style_context().add_class("template-card")
+        btn.add_css_class("template-card")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.pack_start(picture, False, False, 4)
+        pack(box, picture, False, False, 4)
         n = Gtk.Label(label=name, xalign=0)
-        n.get_style_context().add_class("template-name")
-        box.pack_start(n, False, False, 0)
-        box.pack_start(dim_label(sub, wrap=False), False, False, 0)
-        btn.add(box)
+        n.add_css_class("template-name")
+        pack(box, n, False, False, 0)
+        pack(box, dim_label(sub, wrap=False), False, False, 0)
+        btn.set_child(box)
         btn.connect("clicked", lambda *_: cb())
         return btn
 
@@ -718,10 +725,9 @@ class Window(Gtk.ApplicationWindow):
         area = Gtk.DrawingArea()
         area.set_size_request(160, 108)
 
-        def draw(w, cr):
-            a = w.get_allocation()
-            x = int((a.width - surf.get_width()) / 2)
-            y = int((a.height - surf.get_height()) / 2)
+        def draw(_w, cr, width, height):
+            x = int((width - surf.get_width()) / 2)
+            y = int((height - surf.get_height()) / 2)
             cr.set_source_rgba(0, 0, 0, 0.12)
             cr.rectangle(x + 1, y + 2, surf.get_width(), surf.get_height())
             cr.fill()
@@ -731,29 +737,19 @@ class Window(Gtk.ApplicationWindow):
             cr.set_line_width(1)
             cr.rectangle(x + 0.5, y + 0.5, surf.get_width() - 1, surf.get_height() - 1)
             cr.stroke()
-        area.connect("draw", draw)
+        area.set_draw_func(draw)
         card = self._card(area, name, size, lambda: self.start_from(factory))
         if menu:
-            def on_press(_w, ev):
-                if ev.button != 3:
-                    return False
-                m = Gtk.Menu()
-                for text, cb in menu:
-                    it = Gtk.MenuItem(label=text)
-                    it.connect("activate", lambda *_a, cb=cb: cb())
-                    m.append(it)
-                m.show_all()
-                m.attach_to_widget(card, None)
-                m.popup_at_pointer(ev)
-                return True
-            card.connect("button-press-event", on_press)
+            right = Gtk.GestureClick(button=3)
+            right.connect("pressed", lambda g, _n, x, y: (
+                g.set_state(Gtk.EventSequenceState.CLAIMED), popup_menu(card, x, y, menu)))
+            card.add_controller(right)
         return card
 
     # ---- your templates -----------------------------------------------------
 
     def _refresh_user_templates(self):
-        for c in self.user_flow.get_children():
-            self.user_flow.remove(c)
+        clear(self.user_flow)
         found = []
         if os.path.isdir(TEMPLATES_DIR):
             for fname in sorted(os.listdir(TEMPLATES_DIR), key=str.lower):
@@ -779,32 +775,27 @@ class Window(Gtk.ApplicationWindow):
                                        menu=[("Delete Template",
                                               lambda p=path, n=name: self.delete_template(p, n))])
             card.set_tooltip_text("Right-click to delete")
-            card.show_all()
-            self.user_flow.add(card)
+            self.user_flow.append(card)
         self.user_flow.set_visible(bool(found))
         self.user_head.set_visible(bool(found))
-        for child in self.user_flow.get_children():
-            child.show()
 
     def save_as_template(self):
         """Keep the current label on the start screen, to start new labels from."""
-        dlg = Gtk.Dialog(title="Save as Template", transient_for=self, modal=True,
-                         use_header_bar=True)
+        dlg = Dialog(self, "Save as Template")
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
         dlg.set_default_response(Gtk.ResponseType.OK)
-        dlg.get_widget_for_response(Gtk.ResponseType.OK).get_style_context().add_class(
+        dlg.get_widget_for_response(Gtk.ResponseType.OK).add_css_class(
             "suggested-action")
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=16)
+        box = margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), 16)
         default = os.path.splitext(self.doc.name())[0]
         entry = Gtk.Entry(text="" if default == "Untitled label" else default,
                           placeholder_text="e.g. Sorter label", activates_default=True)
-        box.pack_start(dim_label("Your templates appear on the start screen. Starting from "
+        pack(box, dim_label("Your templates appear on the start screen. Starting from "
                                  "one makes a new label; the template stays as it is."),
                        False, False, 0)
-        box.pack_start(entry, False, False, 0)
-        dlg.get_content_area().add(box)
-        dlg.set_default_size(400, -1)
-        dlg.show_all()
+        pack(box, entry, False, False, 0)
+        dlg.get_content_area().append(box)
+        box.set_size_request(368, -1)       # wrapped text: a fixed width, a fixed height
         name = None
         while dlg.run() == Gtk.ResponseType.OK:
             name = re.sub(r'[\\/:*?"<>|]', "-", entry.get_text().strip())
@@ -844,9 +835,9 @@ class Window(Gtk.ApplicationWindow):
         self._refresh_user_templates()
 
     def _custom_card(self) -> Gtk.Widget:
-        img = Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.DIALOG)
+        img = icon("list-add-symbolic", 48)
         img.set_size_request(160, 108)
-        img.get_style_context().add_class("dim")
+        img.add_css_class("dim")
 
         def custom():
             w = self.settings.get("last_width_mm", 101.6)
@@ -857,25 +848,22 @@ class Window(Gtk.ApplicationWindow):
         return self._card(img, "Custom size", "Any width and height", custom)
 
     def _refresh_recent(self):
-        for c in self.recent_list.get_children():
-            self.recent_list.remove(c)
+        clear(self.recent_list)
         recent = [p for p in self.settings.get("recent", []) if os.path.isfile(p)]
         for p in recent:
             row = Gtk.ListBoxRow()
             row.path = p
-            box = Gtk.Box(spacing=12, margin=10)
-            box.pack_start(Gtk.Image.new_from_icon_name("text-x-generic-symbolic",
-                                                        Gtk.IconSize.BUTTON), False, False, 0)
+            box = margins(Gtk.Box(spacing=12), 10)
+            pack(box, Gtk.Image.new_from_icon_name("text-x-generic-symbolic"), False, False, 0)
             col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            col.pack_start(Gtk.Label(label=os.path.basename(p), xalign=0), False, False, 0)
+            pack(col, Gtk.Label(label=os.path.basename(p), xalign=0), False, False, 0)
             folder = dim_label(os.path.dirname(p).replace(os.path.expanduser("~"), "~", 1),
                                wrap=False)
             folder.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-            col.pack_start(folder, False, False, 0)
-            box.pack_start(col, True, True, 0)
-            row.add(box)
-            row.show_all()
-            self.recent_list.add(row)
+            pack(col, folder, False, False, 0)
+            pack(box, col, True, True, 0)
+            row.set_child(box)
+            self.recent_list.append(row)
         self.recent_list.set_visible(bool(recent))
         self.recent_head.set_visible(bool(recent))
 
@@ -890,18 +878,18 @@ class Window(Gtk.ApplicationWindow):
         self._refresh_user_templates()
         self.stack.set_visible_child_name("welcome")
         for w in (self.hist_box, self.view_box, self.print_box, self.save_btn):
-            w.hide()
+            w.set_visible(False)
         self.back_btn.set_visible(bool(self.docs))
-        self.tabs.hide()
+        self.tabs.set_visible(False)
         self._editor_actions_enabled(False)
-        self.header.set_subtitle(None)
+        self.subtitle.set_visible(False)
 
     def show_editor(self):
         self.stack.set_visible_child_name("editor")
         for w in (self.hist_box, self.view_box, self.print_box, self.save_btn):
-            w.show()
-        self.back_btn.hide()
-        self.tabs.show()
+            w.set_visible(True)
+        self.back_btn.set_visible(False)
+        self.tabs.set_visible(True)
         self._editor_actions_enabled(True)
         self.update_title()
 
@@ -912,126 +900,129 @@ class Window(Gtk.ApplicationWindow):
         # The notebook is only the tab strip: its pages are empty and every tab shares
         # the editor below, which shows the current tab's document.
         self.tabs = Gtk.Notebook(scrollable=True, show_border=False)
-        self.tabs.get_style_context().add_class("doc-tabs")
+        self.tabs.add_css_class("doc-tabs")
         self.tabs.connect("switch-page", self._on_switch_tab)
         self.tabs.connect("page-reordered", self._on_tabs_reordered)
         new_tab = icon_button("tab-new-symbolic", "New label (Ctrl+T)", self.new_label)
-        new_tab.show()
+        new_tab.add_css_class("new-tab")
         self.tabs.set_action_widget(new_tab, Gtk.PackType.END)
-        self.tabs.set_no_show_all(True)
-        outer.pack_start(self.tabs, False, False, 0)
+        self.tabs.set_visible(False)
+        pack(outer, self.tabs, False, False, 0)
         main = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        outer.pack_start(main, True, True, 0)
+        pack(outer, main, True, True, 0)
 
         # Left sidebar: insert tiles + layers
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        side.get_style_context().add_class("sidebar")
+        side.add_css_class("sidebar")
         side.set_size_request(230, -1)
         side.set_hexpand(False)
-        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin=8)
-        side.pack_start(inner, True, True, 0)
+        inner = margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), 8)
+        pack(side, inner, True, True, 0)
         t = Gtk.Label(label="Insert", xalign=0)
-        t.get_style_context().add_class("sidebar-title")
-        inner.pack_start(t, False, False, 0)
+        t.add_css_class("sidebar-title")
+        pack(inner, t, False, False, 0)
         grid = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True)
         for i, (kind, text) in enumerate(TOOLS):
             b = Gtk.Button()
-            b.get_style_context().add_class("tile")
+            b.add_css_class("tile")
             b.set_tooltip_text(f"Add {text.lower()}" + (" from a file" if kind == "image" else ""))
             v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-            v.pack_start(Gtk.Image.new_from_icon_name(KIND_ICONS[kind], Gtk.IconSize.LARGE_TOOLBAR),
-                         False, False, 0)
-            v.pack_start(Gtk.Label(label=text), False, False, 0)
-            b.add(v)
+            pack(v, icon(KIND_ICONS[kind], 24), False, False, 0)
+            pack(v, Gtk.Label(label=text), False, False, 0)
+            b.set_child(v)
             b.connect("clicked", lambda _w, k=kind: self.add_element(k))
             grid.attach(b, i % 3, i // 3, 1, 1)
-        inner.pack_start(grid, False, False, 0)
+        pack(inner, grid, False, False, 0)
         t = Gtk.Label(label="Layers", xalign=0)
-        t.get_style_context().add_class("sidebar-title")
-        inner.pack_start(t, False, False, 6)
+        t.add_css_class("sidebar-title")
+        pack(inner, t, False, False, 6)
         self.layers = Gtk.ListBox(selection_mode=Gtk.SelectionMode.MULTIPLE,
                                   activate_on_single_click=False)
-        self.layers.get_style_context().add_class("layers")
+        self.layers.add_css_class("layers")
         self.layers.connect("selected-rows-changed", self._on_layer_selected)
         placeholder = dim_label("Nothing on the label yet. Add something above, or drop an "
                                 "image onto the label.")
         placeholder.set_margin_start(6)
-        placeholder.show()
+        placeholder.set_valign(Gtk.Align.START)
         self.layers.set_placeholder(placeholder)
         ls = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
-        ls.add(self.layers)
-        inner.pack_start(ls, True, True, 0)
-        main.pack_start(side, False, False, 0)
-        main.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+        ls.set_child(self.layers)
+        pack(inner, ls, True, True, 0)
+        pack(main, side, False, False, 0)
+        pack(main, Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
 
         # Canvas with floating controls
         over = Gtk.Overlay()
         self.scroller = Gtk.ScrolledWindow()
-        self.scroller.get_style_context().add_class("canvas-bg")
+        self.scroller.add_css_class("canvas-bg")
         self.canvas = LabelCanvas(self)
         self.canvas.show_grid = self.settings.get("show_grid", False)
         self.canvas.grid_mm = float(self.settings.get("grid_mm", 5))
         self.canvas.snap = self.settings.get("snap", True)
-        self.canvas.connect("scroll-event", self.on_scroll)
-        self.scroller.add(self.canvas)
-        over.add(self.scroller)
+        wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.BOTH_AXES)
+        wheel.connect("scroll", self.on_scroll)
+        self.canvas.add_controller(wheel)
+        self.scroller.set_child(self.canvas)
+        # Clicking the canvas focuses it; don't let that scroll the view under the pointer.
+        self.scroller.get_child().set_scroll_to_focus(False)
+        over.set_child(self.scroller)
 
         zbar = Gtk.Box(spacing=2, halign=Gtk.Align.END, valign=Gtk.Align.END)
-        zbar.get_style_context().add_class("floating-bar")
-        zbar.pack_start(icon_button("zoom-out-symbolic", "Zoom out (Ctrl+−)",
+        zbar.add_css_class("floating-bar")
+        pack(zbar, icon_button("zoom-out-symbolic", "Zoom out (Ctrl+−)",
                                     lambda: self.set_zoom(self.canvas.zoom / 1.25)), False, False, 0)
-        self.zoom_btn = Gtk.Button(label="100%", relief=Gtk.ReliefStyle.NONE)
+        self.zoom_btn = Gtk.Button(label="100%", has_frame=False)
         self.zoom_btn.set_tooltip_text("Actual size: one printer dot per pixel (Ctrl+0)")
         self.zoom_btn.connect("clicked", lambda *_: self.set_zoom(1.0))
-        zbar.pack_start(self.zoom_btn, False, False, 0)
-        zbar.pack_start(icon_button("zoom-in-symbolic", "Zoom in (Ctrl++)",
+        pack(zbar, self.zoom_btn, False, False, 0)
+        pack(zbar, icon_button("zoom-in-symbolic", "Zoom in (Ctrl++)",
                                     lambda: self.set_zoom(self.canvas.zoom * 1.25)), False, False, 0)
-        zbar.pack_start(icon_button("zoom-fit-best-symbolic", "Fit to window (Ctrl+9)",
+        pack(zbar, icon_button("zoom-fit-best-symbolic", "Fit to window (Ctrl+9)",
                                     self.zoom_fit), False, False, 0)
         over.add_overlay(zbar)
         self.status = Gtk.Label(halign=Gtk.Align.START, valign=Gtk.Align.END)
-        self.status.get_style_context().add_class("status-pill")
+        self.status.add_css_class("status-pill")
         over.add_overlay(self.status)
-        over.set_overlay_pass_through(self.status, True)
-        main.pack_start(over, True, True, 0)
-        main.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+        self.status.set_can_target(False)      # clicks go through to the label
+        pack(main, over, True, True, 0)
+        pack(main, Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
 
         # Right panel
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         right.set_size_request(350, -1)
         right.set_hexpand(False)
         self.panel_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
-        sw = Gtk.StackSwitcher(stack=self.panel_stack, halign=Gtk.Align.CENTER, margin=8)
-        right.pack_start(sw, False, False, 0)
-        right.pack_start(self.panel_stack, True, True, 0)
+        sw = margins(Gtk.StackSwitcher(stack=self.panel_stack, halign=Gtk.Align.CENTER), 8)
+        pack(right, sw, False, False, 0)
+        pack(right, self.panel_stack, True, True, 0)
         self.props_box = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.label_box = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.panel_stack.add_titled(self.props_box, "element", "Element")
         self.panel_stack.add_titled(self.label_box, "label", "Label")
         self.panel_stack.add_titled(self._build_zpl_page(), "zpl", "ZPL")
-        main.pack_start(right, False, False, 0)
+        pack(main, right, False, False, 0)
         return outer
 
     def _build_zpl_page(self) -> Gtk.Widget:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
-        box.pack_start(dim_label("The exact commands sent to the printer, with the current "
+        box = margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), 10)
+        pack(box, dim_label("The exact commands sent to the printer, with the current "
                                  "variable values filled in."), False, False, 0)
         self.zpl_view = Gtk.TextView(editable=False, monospace=True, wrap_mode=Gtk.WrapMode.NONE)
-        self.zpl_view.get_style_context().add_class("zpl-view")
-        zs = Gtk.ScrolledWindow()
-        zs.add(self.zpl_view)
+        self.zpl_view.add_css_class("zpl-view")
+        zs = Gtk.ScrolledWindow(hexpand=True)
+        zs.set_child(self.zpl_view)
         card = Gtk.Box()
-        card.get_style_context().add_class("card")
-        card.pack_start(zs, True, True, 0)
-        box.pack_start(card, True, True, 0)
+        card.add_css_class("card")
+        pack(card, zs, True, True, 0)
+        pack(box, card, True, True, 0)
         row = Gtk.Box(spacing=6, homogeneous=True)
         copy = Gtk.Button(label="Copy")
         copy.connect("clicked", lambda *_: self.copy_zpl())
         exp = Gtk.Button(label="Export…")
         exp.set_action_name("win.export-zpl")
-        row.pack_start(copy, True, True, 0)
-        row.pack_start(exp, True, True, 0)
-        box.pack_start(row, False, False, 0)
+        pack(row, copy, True, True, 0)
+        pack(row, exp, True, True, 0)
+        pack(box, row, False, False, 0)
         return box
 
     # ---- document -----------------------------------------------------------
@@ -1048,21 +1039,19 @@ class Window(Gtk.ApplicationWindow):
     def add_document(self, doc: Document):
         page = Gtk.Box()
         page.doc = doc
-        tab = Gtk.Box(spacing=4)
+        tab = Gtk.Box(spacing=4, hexpand=False)     # tabs as wide as their names
         tab.title = Gtk.Label(ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=24)
-        tab.pack_start(tab.title, True, True, 0)
+        pack(tab, tab.title, True, True, 0)
         close = icon_button("window-close-symbolic", "Close (Ctrl+W)",
                             lambda: self.close_document(doc))
-        close.get_style_context().add_class("tab-close")
-        tab.pack_start(close, False, False, 0)
-        tab.show_all()
-        page.show()
+        close.add_css_class("tab-close")
+        pack(tab, close, False, False, 0)
         doc.page, doc.tab = page, tab
         self.docs.append(doc)
         self._update_tab(doc)
         n = self.tabs.append_page(page, tab)
         self.tabs.set_tab_reorderable(page, True)
-        self.tabs.child_set_property(page, "tab-expand", False)
+        self.tabs.get_page(page).set_property("tab-expand", False)
         self.show_editor()
         if self.tabs.get_current_page() == n:
             self.switch_to(doc)       # the first tab: switch-page already fired
@@ -1084,7 +1073,7 @@ class Window(Gtk.ApplicationWindow):
 
     def switch_to(self, doc: Document):
         """Show doc in the editor, keeping the old document's zoom and panel."""
-        if self.doc in self.docs and self.doc is not doc:
+        if self.doc in self.docs and self.doc is not doc and self._fitting is not self.doc:
             self.doc.zoom = self.canvas.zoom
             self.doc.panel = self.panel_stack.get_visible_child_name()
         self.doc = doc
@@ -1104,7 +1093,7 @@ class Window(Gtk.ApplicationWindow):
         self._update_history_buttons()
         if doc.zoom is None:
             self.canvas.resize_to_label()
-            GLib.idle_add(self.zoom_fit)
+            self._fit_when_shown()
         else:
             self.set_zoom(doc.zoom)
 
@@ -1133,21 +1122,14 @@ class Window(Gtk.ApplicationWindow):
         return True
 
     def open_dialog(self):
-        dlg = Gtk.FileChooserNative.new("Open Label", self, Gtk.FileChooserAction.OPEN, None, None)
-        dlg.set_select_multiple(True)
-        for name, exts in (("Labels and ZPL files", LABEL_EXTENSIONS + ZPL_EXTENSIONS),
-                           ("ZPLinux labels (*.zplinux)", LABEL_EXTENSIONS),
-                           ("ZPL from ZebraDesigner and others (*.prn, *.zpl)", ZPL_EXTENSIONS)):
-            f = Gtk.FileFilter()
-            f.set_name(name)
-            for ext in exts:
-                f.add_pattern("*" + ext)
-                f.add_pattern("*" + ext.upper())
-            dlg.add_filter(f)
-        self._set_dialog_folder(dlg)
-        if dlg.run() == Gtk.ResponseType.ACCEPT:
-            for path in dlg.get_filenames():
-                self.open_path(path)
+        filters = [(name, [p for ext in exts for p in ("*" + ext, "*" + ext.upper())])
+                   for name, exts in (
+                       ("Labels and ZPL files", LABEL_EXTENSIONS + ZPL_EXTENSIONS),
+                       ("ZPLinux labels (*.zplinux)", LABEL_EXTENSIONS),
+                       ("ZPL from ZebraDesigner and others (*.prn, *.zpl)", ZPL_EXTENSIONS))]
+        for path in choose_open(self, "Open Label", filters, self._dialog_folder(),
+                                multiple=True):
+            self.open_path(path)
 
     def open_path(self, path):
         target = os.path.abspath(path)
@@ -1197,12 +1179,8 @@ class Window(Gtk.ApplicationWindow):
             self.notify(msg)
 
     def _show_import_notes(self, path, notes):
-        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
-                                message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.CLOSE,
-                                text=f"Imported {os.path.basename(path)}")
-        dlg.format_secondary_text("\n\n".join("• " + n for n in notes))
-        dlg.run()
-        dlg.destroy()
+        alert(self, f"Imported {os.path.basename(path)}", "\n\n".join("• " + n for n in notes),
+              ["Close"], cancel=0, default=0)
 
     def _document_json(self) -> str:
         d = json.loads(self.label.to_json())
@@ -1247,26 +1225,18 @@ class Window(Gtk.ApplicationWindow):
             self.notify(f"Exported {os.path.basename(path)}")
 
     def choose_save(self, title, name, filt) -> Optional[str]:
-        dlg = Gtk.FileChooserNative.new(title, self, Gtk.FileChooserAction.SAVE, None, None)
-        dlg.set_do_overwrite_confirmation(True)
         named = self.path or self.doc.source
         base = os.path.splitext(os.path.basename(named))[0] if named else None
-        dlg.set_current_name(base + os.path.splitext(name)[1] if base else name)
-        f = Gtk.FileFilter()
-        f.set_name(filt[0])
-        f.add_pattern(filt[1])
-        dlg.add_filter(f)
-        self._set_dialog_folder(dlg)
-        if dlg.run() == Gtk.ResponseType.ACCEPT:
-            path = dlg.get_filename()
+        path = widgets.choose_save(self, title,
+                                   base + os.path.splitext(name)[1] if base else name,
+                                   [(filt[0], [filt[1]])], self._dialog_folder())
+        if path:
             self._remember_folder(path)
-            return path
-        return None
+        return path
 
-    def _set_dialog_folder(self, dlg):
+    def _dialog_folder(self) -> Optional[str]:
         folder = self.settings.get("last_folder")
-        if folder and os.path.isdir(folder):
-            dlg.set_current_folder(folder)
+        return folder if folder and os.path.isdir(folder) else None
 
     def _remember_folder(self, path):
         self.settings["last_folder"] = os.path.dirname(os.path.abspath(path))
@@ -1275,20 +1245,15 @@ class Window(Gtk.ApplicationWindow):
     def confirm_discard(self) -> bool:
         if not self.dirty:
             return True
-        dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
-                                text="Save changes to this label?")
-        dlg.format_secondary_text("Your changes will be lost if you don't save them.")
-        dlg.add_buttons("Don't Save", Gtk.ResponseType.NO, "Cancel", Gtk.ResponseType.CANCEL,
-                        "Save", Gtk.ResponseType.YES)
-        dlg.set_default_response(Gtk.ResponseType.YES)
-        r = dlg.run()
-        dlg.destroy()
-        if r == Gtk.ResponseType.YES:
+        r = alert(self, "Save changes to this label?",
+                  "Your changes will be lost if you don't save them.",
+                  ["Don't Save", "Cancel", "Save"], cancel=1, default=2)
+        if r == 2:
             return self.save()
-        return r == Gtk.ResponseType.NO
+        return r == 0
 
     def on_delete_event(self, *_):
-        """Closing the window: offer to save every tab with changes."""
+        """Closing the window: offer to save every tab with changes. True keeps it open."""
         for doc in [d for d in self.docs if d.dirty]:
             self.switch_to(doc)
             if not self.confirm_discard():
@@ -1417,15 +1382,11 @@ class Window(Gtk.ApplicationWindow):
             GLib.idle_add(self.activate_element, el)
 
     def choose_image(self) -> Optional[ImageElement]:
-        dlg = Gtk.FileChooserNative.new("Add Image", self, Gtk.FileChooserAction.OPEN, None, None)
-        f = Gtk.FileFilter()
-        f.set_name("Images")
-        f.add_pixbuf_formats()
-        dlg.add_filter(f)
-        self._set_dialog_folder(dlg)
-        if dlg.run() != Gtk.ResponseType.ACCEPT:
+        paths = choose_open(self, "Add Image", [("Images", Gtk.FileFilter.add_pixbuf_formats)],
+                            self._dialog_folder())
+        if not paths:
             return None
-        return self._image_element(dlg.get_filename(), report=True)
+        return self._image_element(paths[0], report=True)
 
     def _image_element(self, path, report=False) -> Optional[ImageElement]:
         try:
@@ -1657,36 +1618,32 @@ class Window(Gtk.ApplicationWindow):
         if sig != self._layers_sig:
             self._layers_sig = sig
             self._syncing_layers = True
-            for c in self.layers.get_children():
-                self.layers.remove(c)
+            clear(self.layers)
             for el in reversed(els):            # front-most first
                 row = Gtk.ListBoxRow()
                 row.element = el
                 box = Gtk.Box(spacing=10)
-                box.pack_start(Gtk.Image.new_from_icon_name(KIND_ICONS[el.kind],
-                                                            Gtk.IconSize.BUTTON), False, False, 0)
+                pack(box, Gtk.Image.new_from_icon_name(KIND_ICONS[el.kind]), False, False, 0)
                 col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
                 k = Gtk.Label(label=KIND_NAMES[el.kind], xalign=0)
-                k.get_style_context().add_class("layer-kind")
+                k.add_css_class("layer-kind")
                 d = Gtk.Label(label=self.describe(el), xalign=0)
                 d.set_ellipsize(Pango.EllipsizeMode.END)
-                col.pack_start(k, False, False, 0)
-                col.pack_start(d, False, False, 0)
-                box.pack_start(col, True, True, 0)
+                pack(col, k, False, False, 0)
+                pack(col, d, False, False, 0)
+                pack(box, col, True, True, 0)
                 if el.locked:
-                    lk = Gtk.Image.new_from_icon_name("changes-prevent-symbolic",
-                                                      Gtk.IconSize.BUTTON)
+                    lk = Gtk.Image.new_from_icon_name("changes-prevent-symbolic")
                     lk.set_tooltip_text("Locked")
-                    box.pack_end(lk, False, False, 0)
-                row.add(box)
-                row.show_all()
-                self.layers.add(row)
+                    pack_end(box, lk, False, False, 0)
+                row.set_child(box)
+                self.layers.append(row)
             self._syncing_layers = False
         self._sync_layer_selection()
 
     def _sync_layer_selection(self):
         self._syncing_layers = True
-        for row in self.layers.get_children():
+        for row in rows(self.layers):
             if self.is_selected(row.element):
                 self.layers.select_row(row)
             else:
@@ -1718,9 +1675,7 @@ class Window(Gtk.ApplicationWindow):
         return Proxy()
 
     def build_props(self):
-        child = self.props_box.get_child()
-        if child:
-            self.props_box.remove(child)
+        self.props_box.set_child(None)
         el = self.selected
         if len(self.selection) > 1:
             # several objects: what applies to all of them
@@ -1731,27 +1686,23 @@ class Window(Gtk.ApplicationWindow):
                       "to select a group. Align lines them up with each other.")
             self._layout_tools(form, any(e.can_rotate() for e in sel))
             self.props_form = form
-            self.props_box.add(form)
-            self.props_box.show_all()
+            self.props_box.set_child(form)
             return
         if el is None:
             self.props_form = None
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, valign=Gtk.Align.CENTER,
-                          margin=28)
-            box.get_style_context().add_class("empty-state")
-            img = Gtk.Image.new_from_icon_name("input-mouse-symbolic", Gtk.IconSize.DIALOG)
-            img.set_pixel_size(64)
-            box.pack_start(img, False, False, 0)
+            box = margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, valign=Gtk.Align.CENTER), 28)
+            box.add_css_class("empty-state")
+            img = icon("input-mouse-symbolic", 64)
+            pack(box, img, False, False, 0)
             t = Gtk.Label(label="Nothing selected")
-            t.get_style_context().add_class("template-name")
-            box.pack_start(t, False, False, 0)
+            t.add_css_class("template-name")
+            pack(box, t, False, False, 0)
             hint = dim_label("Click something on the label to edit it, or add an element "
                              "from Insert on the left.")
             hint.set_justify(Gtk.Justification.CENTER)
             hint.set_xalign(0.5)
-            box.pack_start(hint, False, False, 0)
-            self.props_box.add(box)
-            self.props_box.show_all()
+            pack(box, hint, False, False, 0)
+            self.props_box.set_child(box)
             return
 
         def on_change(attr):
@@ -1863,8 +1814,7 @@ class Window(Gtk.ApplicationWindow):
         self._layout_tools(form, el.can_rotate())
 
         self.props_form = form
-        self.props_box.add(form)
-        self.props_box.show_all()
+        self.props_box.set_child(form)
 
     # ---- label panel --------------------------------------------------------
 
@@ -1876,9 +1826,7 @@ class Window(Gtk.ApplicationWindow):
             (k, f"{bf.name} – {bf.cell_h} × {bf.cell_w} dots" + (", capitals" if bf.capitals
                                                                  else ""))
             for k, bf in BITMAP_FONTS.items()]
-        combo = Gtk.ComboBoxText()
-        for key, text in fonts:
-            combo.append(key, text)
+        combo = Choice(fonts)
         combo.set_active_id(el.font if el.font in BITMAP_FONTS else "0")
 
         def changed(c):
@@ -1931,20 +1879,20 @@ class Window(Gtk.ApplicationWindow):
     def _barcode_type_row(self, form, el):
         """The Type list at the top of every barcode and QR code: Code 128, QR and the
         symbology table, grouped by separators."""
-        combo = Gtk.ComboBoxText()
-        combo.set_row_separator_func(lambda model, it: model[it][1] == "-")
-        combo.append("code128", "Code 128")
+        items, firsts = [("code128", "Code 128")], []
         last = "1D"
         for sym in symbology.SYMBOLOGIES:
             if sym.group != last:
-                combo.append("-", "-")
                 if sym.group == "2D":
-                    combo.append("qr", "QR code")
+                    items.append(("qr", "QR code"))
+                    firsts.append("qr")
+                else:
+                    firsts.append(sym.key)
                 last = sym.group
-            combo.append(sym.key, sym.name)
+            items.append((sym.key, sym.name))
+        combo = Choice(items, lines_above=firsts)
         combo.set_active_id(barcode_type(el))
-        combo.set_wrap_width(1)
-        combo.connect("changed", lambda c: c.get_active_id() not in (None, "-")
+        combo.connect("changed", lambda c: c.get_active_id() is not None
                       and GLib.idle_add(self.change_barcode_type, el, c.get_active_id()))
         form.widget(combo, "Type")
 
@@ -2036,34 +1984,34 @@ class Window(Gtk.ApplicationWindow):
                 "vcenter": "Center vertically", "bottom": "Align to bottom edge"}
         for group in (("left", "hcenter", "right"), ("top", "vcenter", "bottom")):
             g = Gtk.Box(homogeneous=True)
-            g.get_style_context().add_class("linked")
+            g.add_css_class("linked")
             for where in group:
-                g.pack_start(icon_button(f"zplinux-align-{where}-symbolic", tips[where],
+                pack(g, icon_button(f"zplinux-align-{where}-symbolic", tips[where],
                                          lambda w=where: self.align(w), flat=False), True, True, 0)
-            align.pack_start(g, True, True, 0)
+            pack(align, g, True, True, 0)
         form.widget(align)
 
         form.section("Arrange")
         arr = Gtk.Box(spacing=6)
         order = Gtk.Box()
-        order.get_style_context().add_class("linked")
+        order.add_css_class("linked")
         for icon, tip, where in (("go-top-symbolic", "Bring to front", "top"),
                                  ("go-up-symbolic", "Bring forward", "up"),
                                  ("go-down-symbolic", "Send backward", "down"),
                                  ("go-bottom-symbolic", "Send to back", "bottom")):
-            order.pack_start(icon_button(icon, tip, lambda w=where: self.restack(w), flat=False),
+            pack(order, icon_button(icon, tip, lambda w=where: self.restack(w), flat=False),
                              False, False, 0)
-        arr.pack_start(order, False, False, 0)
-        arr.pack_start(icon_button("edit-copy-symbolic", "Duplicate (Ctrl+D)",
+        pack(arr, order, False, False, 0)
+        pack(arr, icon_button("edit-copy-symbolic", "Duplicate (Ctrl+D)",
                                    self.duplicate_selected, flat=False), False, False, 0)
         if rotatable:
-            arr.pack_start(icon_button("object-rotate-right-symbolic",
+            pack(arr, icon_button("object-rotate-right-symbolic",
                                        "Rotate 90° clockwise (Ctrl+R)",
                                        lambda: self.rotate_selected(90), flat=False),
                            False, False, 0)
         delete = icon_button("user-trash-symbolic", "Delete (Del)", self.delete_selected, flat=False)
-        delete.get_style_context().add_class("destructive-action")
-        arr.pack_end(delete, False, False, 0)
+        delete.add_css_class("destructive-action")
+        pack_end(arr, delete, False, False, 0)
         form.widget(arr)
 
     def rotate_selected(self, step: int = 90):
@@ -2096,9 +2044,7 @@ class Window(Gtk.ApplicationWindow):
         return False
 
     def refresh_label_panel(self):
-        child = self.label_box.get_child()
-        if child:
-            self.label_box.remove(child)
+        self.label_box.set_child(None)
         lab = self.label
         p = self._proxy(lab, "label")
         imperial = self.unit == "in"
@@ -2117,10 +2063,8 @@ class Window(Gtk.ApplicationWindow):
 
         form = PropertyForm(changed, self.unit, lab.dpi)
         form.section("Label size")
-        preset = Gtk.ComboBoxText()
-        preset.append("custom", "Custom")
-        for i, (name, _w, _h) in enumerate(SIZE_PRESETS):
-            preset.append(str(i), name)
+        preset = Choice([("custom", "Custom")] + [(str(i), name) for i, (name, _w, _h)
+                                                  in enumerate(SIZE_PRESETS)])
         cur = next((str(i) for i, (_n, w, h) in enumerate(SIZE_PRESETS)
                     if abs(w - lab.width_mm) < 0.01 and abs(h - lab.height_mm) < 0.01), "custom")
         preset.set_active_id(cur)
@@ -2141,10 +2085,8 @@ class Window(Gtk.ApplicationWindow):
             hspin.set_value(h / MM_PER_INCH if imperial else h)
         preset.connect("changed", on_preset)
         form.combo("Resolution", p, "dpi", [(d, f"{d} dpi") for d in DPI_CHOICES])
-        turn_print = Gtk.ComboBoxText()
-        for deg, text in ((0, "No"), (90, "90° clockwise"), (180, "180°"),
-                          (270, "90° counterclockwise")):
-            turn_print.append(str(deg), text)
+        turn_print = Choice([(str(deg), text) for deg, text in (
+            (0, "No"), (90, "90° clockwise"), (180, "180°"), (270, "90° counterclockwise"))])
         turn_print.set_active_id(str(lab.orientation % 360))
         turn_print.connect("changed", lambda c: GLib.idle_add(
             self.set_orientation, int(c.get_active_id())))
@@ -2179,9 +2121,8 @@ class Window(Gtk.ApplicationWindow):
         csvb.set_action_name("win.print-csv")
         form.widget(csvb)
         self._shown_vars = None
-        self.label_box.add(form)
+        self.label_box.set_child(form)
         self.refresh_label_panel_vars()
-        self.label_box.show_all()
 
     def refresh_label_panel_vars(self):
         grid = getattr(self, "vars_grid", None)
@@ -2191,8 +2132,7 @@ class Window(Gtk.ApplicationWindow):
         if self._shown_vars == names:
             return
         self._shown_vars = names
-        for c in grid.get_children():
-            grid.remove(c)
+        clear(grid)
         if not names:
             grid.attach(dim_label("Type {name} in any text, barcode or QR field to create a "
                                   "variable. Fill it in here, or print one label per row of a "
@@ -2211,10 +2151,11 @@ class Window(Gtk.ApplicationWindow):
             e.connect("changed", changed)
             # Enter moves on to the next variable (from the last, back to the first)
             e.connect("activate", lambda _w, i=i: self._focus_variable(entries, i + 1))
-            e.connect("focus-in-event", lambda w, _ev: scroll_into_view(self.label_box, w) and False)
+            focus = Gtk.EventControllerFocus()
+            focus.connect("enter", lambda _c, w=e: scroll_into_view(self.label_box, w))
+            e.add_controller(focus)
             entries.append(e)
             grid.attach(e, 1, i, 1, 1)
-        grid.show_all()
 
     def _focus_variable(self, entries, i):
         target = entries[i % len(entries)]
@@ -2235,7 +2176,8 @@ class Window(Gtk.ApplicationWindow):
     # ---- refresh ------------------------------------------------------------
 
     def update_title(self):
-        self.header.set_subtitle(("• " if self.dirty else "") + self.doc.name())
+        self.subtitle.set_text(("• " if self.dirty else "") + self.doc.name())
+        self.subtitle.set_visible(True)
         if self.doc in self.docs:
             self._update_tab(self.doc)
 
@@ -2251,7 +2193,7 @@ class Window(Gtk.ApplicationWindow):
         self._later("zpl", do, 150)
 
     def copy_zpl(self):
-        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(self.current_zpl(), -1)
+        self.get_clipboard().set(self.current_zpl())
         self.notify("ZPL copied to the clipboard")
 
     def notify(self, msg: str, action: Optional[str] = None, cb: Optional[Callable] = None):
@@ -2294,12 +2236,27 @@ class Window(Gtk.ApplicationWindow):
         self.canvas.center_on_label()
 
     def zoom_fit(self):
-        a = self.scroller.get_allocation()
-        if a.width < 50:
+        width, height = self.scroller.get_width(), self.scroller.get_height()
+        if width < 50:
             return False
-        z = min((a.width - 80) / self.label.width_dots, (a.height - 120) / self.label.height_dots)
+        z = min((width - 80) / self.label.width_dots, (height - 120) / self.label.height_dots)
         self.set_zoom(z)
         return False
+
+    def _fit_when_shown(self):
+        """Fit the label to the window once the canvas has its size (GTK lays out on the
+        next frame, after the editor is shown)."""
+        doc = self._fitting = self.doc
+
+        def tick(_w, _clock):
+            if self.scroller.get_width() < 50:
+                return GLib.SOURCE_CONTINUE
+            if self._fitting is doc:
+                self._fitting = None
+                if self.doc is doc:
+                    self.zoom_fit()
+            return GLib.SOURCE_REMOVE
+        self.scroller.add_tick_callback(tick)
 
     def visible_center(self):
         """Centre of the visible part of the label, staggered so new elements don't stack."""
@@ -2314,26 +2271,24 @@ class Window(Gtk.ApplicationWindow):
         return (int(min(max(0, (x0 + x1) / 2 + step), lw - 50)),
                 int(min(max(0, (y0 + y1) / 2 + step), lh - 30)))
 
-    def on_scroll(self, widget, ev):
-        if ev.state & Gdk.ModifierType.CONTROL_MASK:
-            ok, _dx, dy = ev.get_scroll_deltas()
-            up = ev.direction == Gdk.ScrollDirection.UP or (ok and dy < 0)
-            self.set_zoom(self.canvas.zoom * (1.12 if up else 1 / 1.12))
+    def on_scroll(self, controller, _dx, dy):
+        """Ctrl+wheel zooms; the plain wheel scrolls."""
+        if controller.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK:
+            if dy:
+                self.set_zoom(self.canvas.zoom * (1.12 if dy < 0 else 1 / 1.12))
             return True
         return False
 
     # ---- context menu & keys ------------------------------------------------
 
     def context_menu(self, ev, el: Optional[Element]):
-        menu = Gtk.Menu()
+        menu = []
 
         def item(text, cb):
-            it = Gtk.MenuItem(label=text)
-            it.connect("activate", lambda *_: cb())
-            menu.append(it)
+            menu.append((text, cb))
 
         def sep():
-            menu.append(Gtk.SeparatorMenuItem())
+            menu.append(None)
 
         if el is not None:
             if isinstance(el, (TextElement, Code128Element, QRElement)):
@@ -2354,9 +2309,7 @@ class Window(Gtk.ApplicationWindow):
             at = (int(max(0, x)), int(max(0, y)))
             for kind, text in TOOLS:
                 item(f"Add {text} Here", lambda k=kind: self.add_element(k, at))
-        menu.show_all()
-        menu.attach_to_widget(self.canvas, None)
-        menu.popup_at_pointer(ev)
+        popup_menu(self.canvas, ev.x, ev.y, menu)
 
     def on_key(self, widget, ev):
         if not self.in_editor():
@@ -2366,7 +2319,8 @@ class Window(Gtk.ApplicationWindow):
             return False
         key = Gdk.keyval_name(ev.keyval) or ""
         # Leave typing keys alone while an input field has focus; Escape returns to the canvas.
-        if isinstance(self.get_focus(), (Gtk.Entry, Gtk.TextView, Gtk.SpinButton)):
+        # (in GTK 4 the focus is on the text inside an entry, which is a Gtk.Editable)
+        if isinstance(self.get_focus(), (Gtk.Editable, Gtk.TextView)):
             if key == "Escape":
                 self.canvas.grab_focus()
                 return True
@@ -2374,7 +2328,7 @@ class Window(Gtk.ApplicationWindow):
         if ev.state & Gdk.ModifierType.CONTROL_MASK and key.lower() == "a":
             self.select_all()
             return True
-        if ev.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
+        if ev.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
             return False
         shift = bool(ev.state & Gdk.ModifierType.SHIFT_MASK)
         if key in ("Delete", "BackSpace"):
@@ -2422,22 +2376,15 @@ class Window(Gtk.ApplicationWindow):
 
     def print_csv(self):
         """Print one label per row of a CSV, Excel or LibreOffice file."""
-        dlg = Gtk.FileChooserNative.new("Print a Batch", self, Gtk.FileChooserAction.OPEN,
-                                        None, None)
-        for name, exts in (("Spreadsheets and CSV", datafile.EXTENSIONS),
-                           ("CSV files", (".csv", ".tsv", ".txt")),
-                           ("Excel (.xlsx)", (".xlsx", ".xlsm")),
-                           ("LibreOffice / OpenOffice (.ods)", (".ods",))):
-            f = Gtk.FileFilter()
-            f.set_name(name)
-            for ext in exts:
-                f.add_pattern("*" + ext)
-                f.add_pattern("*" + ext.upper())
-            dlg.add_filter(f)
-        self._set_dialog_folder(dlg)
-        if dlg.run() != Gtk.ResponseType.ACCEPT:
+        filters = [(name, [p for ext in exts for p in ("*" + ext, "*" + ext.upper())])
+                   for name, exts in (("Spreadsheets and CSV", datafile.EXTENSIONS),
+                                      ("CSV files", (".csv", ".tsv", ".txt")),
+                                      ("Excel (.xlsx)", (".xlsx", ".xlsm")),
+                                      ("LibreOffice / OpenOffice (.ods)", (".ods",)))]
+        paths = choose_open(self, "Print a Batch", filters, self._dialog_folder())
+        if not paths:
             return
-        path = dlg.get_filename()
+        path = paths[0]
         try:
             rows = datafile.read_rows(path)
         except datafile.DataFileError as e:
@@ -2500,10 +2447,10 @@ class Window(Gtk.ApplicationWindow):
         return True
 
     def printer_dialog(self):
-        dlg = Gtk.Dialog(title="Printers", transient_for=self, modal=True, use_header_bar=True)
+        dlg = Dialog(self, "Printers")
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
         dlg.set_default_response(Gtk.ResponseType.OK)
-        dlg.get_widget_for_response(Gtk.ResponseType.OK).get_style_context().add_class(
+        dlg.get_widget_for_response(Gtk.ResponseType.OK).add_css_class(
             "suggested-action")
         # Edit copies; nothing changes until Save.
         printers = [printing.PrinterConfig.from_dict(p.to_dict()) for p in self.printers]
@@ -2511,32 +2458,30 @@ class Window(Gtk.ApplicationWindow):
         state = SimpleNamespace(current=None, default=printers[self.default_printer],
                                 loading=False)
 
-        body = Gtk.Box(spacing=16, margin=16)
-        dlg.get_content_area().add(body)
+        body = margins(Gtk.Grid(column_spacing=16), 16)
+        dlg.get_content_area().append(body)
 
         # left: the saved printers
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        body.pack_start(side, False, False, 0)
+        body.attach(side, 0, 0, 1, 1)
         listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.BROWSE)
         sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, min_content_height=240,
-                                shadow_type=Gtk.ShadowType.IN)
+                                has_frame=True)
         sw.set_size_request(250, -1)
-        sw.add(listbox)
-        side.pack_start(sw, True, True, 0)
+        sw.set_child(listbox)
+        pack(side, sw, True, True, 0)
         tools = Gtk.Box()
-        tools.get_style_context().add_class("linked")
-        side.pack_start(tools, False, False, 0)
+        tools.add_css_class("linked")
+        pack(side, tools, False, False, 0)
 
         # right: the selected printer
         grid = Gtk.Grid(column_spacing=10, row_spacing=10, hexpand=True)
-        body.pack_start(grid, True, True, 0)
+        body.attach(grid, 1, 0, 1, 1)
         name = Gtk.Entry(hexpand=True, activates_default=True,
                          placeholder_text="e.g. Warehouse GK420d")
         grid.attach(Gtk.Label(label="Name", xalign=0), 0, 0, 1, 1)
         grid.attach(name, 1, 0, 1, 1)
-        method = Gtk.ComboBoxText()
-        for m in printing.METHODS:
-            method.append(m, printing.METHOD_LABELS[m])
+        method = Choice([(m, printing.METHOD_LABELS[m]) for m in printing.METHODS])
         grid.attach(Gtk.Label(label="Connection", xalign=0), 0, 1, 1, 1)
         grid.attach(method, 1, 1, 1, 1)
         stack = Gtk.Stack(vhomogeneous=False)
@@ -2555,25 +2500,19 @@ class Window(Gtk.ApplicationWindow):
         stack.add_named(g, "network")
 
         g = Gtk.Grid(column_spacing=10, row_spacing=10)
-        dev = Gtk.ComboBoxText.new_with_entry()
         found = printing.usb_devices()
-        for d in found:
-            dev.append_text(d)
-        dev.set_hexpand(True)
+        dev_box, dev = entry_with_choices(found, activates_default=True)
         g.attach(Gtk.Label(label="Device", xalign=0), 0, 0, 1, 1)
-        g.attach(dev, 1, 0, 1, 1)
+        g.attach(dev_box, 1, 0, 1, 1)
         g.attach(dim_label(("Found: " + ", ".join(found)) if found else
                            "No USB printer found right now (/dev/usb/lp*). Writing to it "
                            "needs membership of the 'lp' group."), 0, 1, 2, 1)
         stack.add_named(g, "device")
 
         g = Gtk.Grid(column_spacing=10, row_spacing=10)
-        queue = Gtk.ComboBoxText.new_with_entry()
-        for q in printing.cups_queues():
-            queue.append_text(q)
-        queue.set_hexpand(True)
+        queue_box, queue = entry_with_choices(printing.cups_queues(), activates_default=True)
         g.attach(Gtk.Label(label="Printer", xalign=0), 0, 0, 1, 1)
-        g.attach(queue, 1, 0, 1, 1)
+        g.attach(queue_box, 1, 0, 1, 1)
         g.attach(dim_label("Sends ZPL unchanged with 'lp -o raw'. Set the queue up as a "
                            "Raw printer (no driver) so CUPS does not convert it."), 0, 1, 2, 1)
         stack.add_named(g, "cups")
@@ -2591,8 +2530,8 @@ class Window(Gtk.ApplicationWindow):
         test = Gtk.Button(label="Check Printer")
         result = dim_label("")
         result.set_selectable(True)
-        test_row.pack_start(test, False, False, 0)
-        test_row.pack_start(result, True, True, 0)
+        pack(test_row, test, False, False, 0)
+        pack(test_row, result, True, True, 0)
         grid.attach(test_row, 0, 4, 2, 1)
 
         def store():
@@ -2604,8 +2543,8 @@ class Window(Gtk.ApplicationWindow):
             cfg.method = method.get_active_id()
             cfg.host = host.get_text().strip()
             cfg.port = port.get_value_as_int()
-            cfg.device = dev.get_child().get_text().strip()
-            cfg.cups_queue = queue.get_child().get_text().strip()
+            cfg.device = dev.get_text().strip()
+            cfg.cups_queue = queue.get_text().strip()
             cfg.file_path = fentry.get_text().strip()
 
         def load(cfg):
@@ -2616,8 +2555,8 @@ class Window(Gtk.ApplicationWindow):
             stack.set_visible_child_name(cfg.method)
             host.set_text(cfg.host)
             port.set_value(cfg.port)
-            dev.get_child().set_text(cfg.device)
-            queue.get_child().set_text(cfg.cups_queue)
+            dev.set_text(cfg.device)
+            queue.set_text(cfg.cups_queue)
             fentry.set_text(cfg.file_path)
             default.set_active(cfg is state.default)
             default.set_sensitive(cfg is not state.default)   # always keep one default
@@ -2629,25 +2568,22 @@ class Window(Gtk.ApplicationWindow):
             row.tag.set_visible(row.printer is state.default)
 
         def fill_list(select):
-            for row in listbox.get_children():
-                listbox.remove(row)
+            clear(listbox)
             for cfg in printers:
                 row = Gtk.ListBoxRow()
                 row.printer = cfg
-                hbox = Gtk.Box(spacing=8, margin=6)
-                hbox.pack_start(Gtk.Image.new_from_icon_name(PRINTER_ICONS[cfg.method],
-                                                             Gtk.IconSize.BUTTON), False, False, 0)
+                hbox = margins(Gtk.Box(spacing=8), 6)
+                pack(hbox, Gtk.Image.new_from_icon_name(PRINTER_ICONS[cfg.method]), False, False, 0)
                 row.label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-                hbox.pack_start(row.label, True, True, 0)
+                pack(hbox, row.label, True, True, 0)
                 row.tag = dim_label("Default", wrap=False)
-                row.tag.set_no_show_all(True)
-                hbox.pack_end(row.tag, False, False, 0)
+                row.tag.set_visible(False)
+                pack_end(hbox, row.tag, False, False, 0)
                 update_row(row)
-                row.add(hbox)
-                listbox.add(row)
+                row.set_child(hbox)
+                listbox.append(row)
                 if cfg is select:
                     listbox.select_row(row)
-            listbox.show_all()
             remove.set_sensitive(len(printers) > 1)
 
         def selected(_lb, row):
@@ -2690,7 +2626,7 @@ class Window(Gtk.ApplicationWindow):
                 return
             state.default = state.current
             b.set_sensitive(False)
-            for row in listbox.get_children():
+            for row in rows(listbox):
                 update_row(row)
 
         def run_test():
@@ -2699,18 +2635,17 @@ class Window(Gtk.ApplicationWindow):
 
         addb = icon_button("list-add-symbolic", "Add printer", add, flat=False)
         remove = icon_button("list-remove-symbolic", "Remove printer", delete, flat=False)
-        tools.pack_start(addb, False, False, 0)
-        tools.pack_start(remove, False, False, 0)
+        pack(tools, addb, False, False, 0)
+        pack(tools, remove, False, False, 0)
         listbox.connect("row-selected", selected)
-        for w in (name, host, fentry, dev.get_child(), queue.get_child()):
+        for w in (name, host, fentry, dev, queue):
             w.connect("changed", changed)
         port.connect("value-changed", changed)
         method.connect("changed", method_changed)
         default.connect("toggled", default_toggled)
         test.connect("clicked", lambda *_: run_test())
 
-        dlg.set_default_size(760, -1)
-        dlg.show_all()
+        grid.set_size_request(462, -1)
         fill_list(in_use)
         if dlg.run() == Gtk.ResponseType.OK:
             store()
@@ -2726,8 +2661,7 @@ class Window(Gtk.ApplicationWindow):
     # ---- preferences --------------------------------------------------------
 
     def preferences_dialog(self):
-        dlg = Gtk.Dialog(title="Preferences", transient_for=self, modal=True, use_header_bar=True)
-        dlg.set_default_size(440, -1)
+        dlg = Dialog(self, "Preferences")
         prefs = SimpleNamespace(units=self.unit,
                                 show_grid=self.canvas.show_grid,
                                 grid_mm=float(self.canvas.grid_mm),
@@ -2758,6 +2692,7 @@ class Window(Gtk.ApplicationWindow):
             save_settings(self.settings)
 
         form = PropertyForm(changed)
+        form.set_size_request(440, -1)      # wrapped hints: a fixed width, a fixed height
         form.section("Editing")
         form.combo("Units", prefs, "units", [("mm", "Millimetres"), ("in", "Inches"),
                                              ("dots", "Printer dots")])
@@ -2783,11 +2718,10 @@ class Window(Gtk.ApplicationWindow):
             row = Gtk.Box(spacing=10)
             btn = Gtk.Button(label="Check Now")
             btn.connect("clicked", lambda *_: self.check_updates(manual=True))
-            row.pack_start(btn, False, False, 0)
-            row.pack_start(dim_label(f"You have version {__version__}."), True, True, 0)
+            pack(row, btn, False, False, 0)
+            pack(row, dim_label(f"You have version {__version__}."), True, True, 0)
             form.widget(row)
-        dlg.get_content_area().add(form)
-        dlg.show_all()
+        dlg.get_content_area().append(form)
         dlg.run()
         dlg.destroy()
 
@@ -2814,7 +2748,7 @@ class Window(Gtk.ApplicationWindow):
                                  ("<Primary>comma", "Preferences")]))
         w = Gtk.Builder.new_from_string(ui, -1).get_object("shortcuts")
         w.set_transient_for(self)
-        w.show_all()
+        w.present()
 
     # ---- updates ------------------------------------------------------------
 
@@ -2850,10 +2784,10 @@ class Window(Gtk.ApplicationWindow):
         self.update_install_btn.set_label("Install" if can_install else "Download")
         self.update_text.set_markup(f"<b>{APP_NAME} {GLib.markup_escape_text(rel.version)}</b> "
                                     f"is available. You have {__version__}.")
-        self.update_restart_btn.hide()
-        self.update_install_btn.show()
-        self.update_notes_btn.show()
-        self.update_bar.show()
+        self.update_restart_btn.set_visible(False)
+        self.update_install_btn.set_visible(True)
+        self.update_notes_btn.set_visible(True)
+        self.update_bar.set_visible(True)
         return False
 
     def install_update(self):
@@ -2870,7 +2804,7 @@ class Window(Gtk.ApplicationWindow):
                           "Opening the download page.",
             }.get(method, "Opening the download page.")
             self.notify(hint)
-            Gtk.show_uri_on_window(self, rel.url, Gdk.CURRENT_TIME)
+            open_uri(self, rel.url)
             return
         if not self.ask(f"Install {APP_NAME} {rel.version}?",
                         f"{asset} will be downloaded from GitHub, checked against its published "
@@ -2907,9 +2841,9 @@ class Window(Gtk.ApplicationWindow):
             self.latest = None
             self.update_text.set_markup(f"<b>{APP_NAME} {GLib.markup_escape_text(rel.version)}</b> "
                                         "is installed. Restart to start using it.")
-            self.update_install_btn.hide()
-            self.update_notes_btn.hide()
-            self.update_restart_btn.show()
+            self.update_install_btn.set_visible(False)
+            self.update_notes_btn.set_visible(False)
+            self.update_restart_btn.set_visible(True)
         elif rc in (126, 127):
             self.update_text.set_text("Update cancelled: authorization was denied.")
         else:
@@ -2926,21 +2860,10 @@ class Window(Gtk.ApplicationWindow):
     # ---- dialogs ------------------------------------------------------------
 
     def error(self, title, detail):
-        dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR,
-                                buttons=Gtk.ButtonsType.CLOSE, text=title)
-        dlg.format_secondary_text(detail)
-        dlg.run()
-        dlg.destroy()
+        alert(self, title, detail, ["Close"], cancel=0, default=0)
 
     def ask(self, title, detail, ok="OK") -> bool:
-        dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
-                                text=title)
-        dlg.format_secondary_text(detail)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, ok, Gtk.ResponseType.OK)
-        dlg.set_default_response(Gtk.ResponseType.OK)
-        r = dlg.run()
-        dlg.destroy()
-        return r == Gtk.ResponseType.OK
+        return alert(self, title, detail, ["Cancel", ok], cancel=0, default=1) == 1
 
     def about(self):
         dlg = Gtk.AboutDialog(transient_for=self, modal=True, program_name=APP_NAME,
@@ -2950,8 +2873,7 @@ class Window(Gtk.ApplicationWindow):
                               website=f"https://github.com/{updater.REPO}",
                               website_label="Project page",
                               license_type=Gtk.License.GPL_3_0_ONLY)
-        dlg.run()
-        dlg.destroy()
+        dlg.present()
 
 
 class App(Gtk.Application):
@@ -2962,11 +2884,11 @@ class App(Gtk.Application):
     def do_startup(self):
         Gtk.Application.do_startup(self)
         # ZPLinux's own icons: from the source tree, or where install.sh puts them.
-        theme = Gtk.IconTheme.get_default()
+        theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
         for d in (os.path.join(HERE, "data", "icons"), os.path.join(HERE, "data"),
                   os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "zplinux", "icons")):
             if os.path.isdir(d):
-                theme.append_search_path(d)
+                theme.add_search_path(d)
 
     def do_activate(self):
         if not self.window:
@@ -2984,4 +2906,8 @@ class App(Gtk.Application):
 
 
 def main() -> int:
+    if (Gtk.get_major_version(), Gtk.get_minor_version()) < (4, 12):
+        print(f"{APP_NAME} needs GTK 4.12 or newer; this system has "
+              f"{Gtk.get_major_version()}.{Gtk.get_minor_version()}.", file=sys.stderr)
+        return 1
     return App().run(sys.argv)

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import List, Optional, Tuple
-from urllib.parse import unquote, urlparse
 
 import gi
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from . import render  # noqa: E402
@@ -31,7 +31,7 @@ class LabelCanvas(Gtk.DrawingArea):
     host.activate_element(), host.drop_files() and host.pointer_moved()."""
 
     def __init__(self, host):
-        super().__init__(can_focus=True)
+        super().__init__(focusable=True)
         self.host = host
         self.zoom = 1.0
         self.show_grid = False
@@ -42,18 +42,23 @@ class LabelCanvas(Gtk.DrawingArea):
         self.guides: List[Tuple[str, float]] = []   # ("v", x) / ("h", y) in dots
         self.extents = (0.0, 0.0, 1.0, 1.0)  # work area in dots: x0, y0, x1, y1
         self._center_pending = False
-        self.connect("size-allocate", self._on_allocate)
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
-                        | Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.SCROLL_MASK
-                        | Gdk.EventMask.SMOOTH_SCROLL_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
-        self.connect("draw", self.on_draw)
-        self.connect("button-press-event", self.on_press)
-        self.connect("button-release-event", self.on_release)
-        self.connect("motion-notify-event", self.on_motion)
-        self.connect("leave-notify-event", self.on_leave)
-        self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY)
-        self.drag_dest_add_uri_targets()
-        self.connect("drag-data-received", self.on_drop)
+        self._pressed = None        # (x, y) where the button went down, while it is down
+        self._last_click = (0, 0.0, 0.0)   # time, x, y: for double-clicks
+        self.set_draw_func(lambda _a, cr, _w, _h: self.on_draw(self, cr))
+        # The left button's press, moves and release come from a drag gesture, the right
+        # button's press from a click gesture; both hand them on as plain events with
+        # x, y, button and state.
+        drag = Gtk.GestureDrag(button=1)
+        drag.connect("drag-begin", self._drag_begin)
+        drag.connect("drag-update", self._drag_update)
+        drag.connect("drag-end", self._drag_end)
+        self.add_controller(drag)
+        right = Gtk.GestureClick(button=3)
+        right.connect("pressed", self._right_click)
+        self.add_controller(right)
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop.connect("drop", self._dropped)
+        self.add_controller(drop)
 
     # ---- geometry -----------------------------------------------------------
 
@@ -79,11 +84,24 @@ class LabelCanvas(Gtk.DrawingArea):
     def origin(self) -> Tuple[float, float]:
         """Where dot (0, 0), the label's top-left, is in widget pixels; the work area is
         centred when it is smaller than the visible area."""
-        a = self.get_allocation()
         x0, y0, x1, y1 = self.extents
         w, h = (x1 - x0) * self.zoom, (y1 - y0) * self.zoom
-        return (max(MARGIN, (a.width - w) / 2) - x0 * self.zoom,
-                max(MARGIN, (a.height - h) / 2) - y0 * self.zoom)
+        return (max(MARGIN, (self.get_width() - w) / 2) - x0 * self.zoom,
+                max(MARGIN, (self.get_height() - h) / 2) - y0 * self.zoom)
+
+    def _after_layout(self, fn):
+        """Run fn once GTK has laid the canvas out at its new size (on a later frame), so
+        the scrollbars know the new size too."""
+        frames = [0]
+
+        def tick(_w, _clock):
+            want_w, want_h = self.get_size_request()
+            frames[0] += 1
+            if frames[0] < 30 and (self.get_width() < want_w - 1 or self.get_height() < want_h - 1):
+                return GLib.SOURCE_CONTINUE
+            fn()
+            return GLib.SOURCE_REMOVE
+        self.add_tick_callback(tick)
 
     def _keep_still(self, old_x0: float, old_y0: float):
         """After the work area grew left or up, scroll by as much so nothing moves."""
@@ -97,24 +115,19 @@ class LabelCanvas(Gtk.DrawingArea):
                                (sw.get_vadjustment(), old_y0 - y0)):
                     if d > 0:
                         adj.set_value(adj.get_value() + d * self.zoom)
-            return False
-        GLib.idle_add(shift)
+        self._after_layout(shift)
 
     def center_on_label(self):
         """Scroll so the label is in the middle of the view, once the canvas has its new
-        size (or now, if the size doesn't change)."""
-        self._center_pending = True
-        GLib.timeout_add(150, self._center_if_pending)
-
-    def _on_allocate(self, _w, _a):
-        if self._center_pending:
-            GLib.idle_add(self._center_if_pending)
+        size."""
+        if not self._center_pending:
+            self._center_pending = True
+            self._after_layout(self._center_if_pending)
 
     def _center_if_pending(self):
         if self._center_pending:
             self._center_pending = False
             self._center()
-        return False
 
     def _center(self):
         sw = self.get_parent()
@@ -291,16 +304,55 @@ class LabelCanvas(Gtk.DrawingArea):
 
     # ---- events -------------------------------------------------------------
 
+    @staticmethod
+    def _event(gesture, x, y, **more):
+        return SimpleNamespace(x=x, y=y, button=gesture.get_current_button(),
+                               state=gesture.get_current_event_state(), **more)
+
+    def _drag_begin(self, gesture, x, y):
+        ev = self._event(gesture, x, y, n_press=1)
+        ev_time = gesture.get_current_event_time()
+        settings = Gtk.Settings.get_default()
+        wait = settings.get_property("gtk-double-click-time") if settings else 400
+        t, lx, ly = self._last_click
+        if ev_time - t <= wait and abs(x - lx) < 6 and abs(y - ly) < 6:
+            ev.n_press = 2
+            self._last_click = (0, 0.0, 0.0)
+        else:
+            self._last_click = (ev_time, x, y)
+        self._pressed = (x, y)
+        self.on_press(self, ev)
+
+    def _right_click(self, gesture, _n, x, y):
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        self.on_press(self, self._event(gesture, x, y, n_press=1))
+
+    def _drag_update(self, gesture, dx, dy):
+        if self._pressed is not None:
+            x, y = self._pressed
+            self.on_motion(self, self._event(gesture, x + dx, y + dy))
+
+    def _drag_end(self, gesture, dx, dy):
+        if self._pressed is not None:
+            x, y = self._pressed
+            self._pressed = None
+            self.on_release(self, self._event(gesture, x + dx, y + dy))
+
+    def _hover(self, controller, x, y):
+        state = controller.get_current_event_state()
+        if self._pressed is not None and not state & Gdk.ModifierType.BUTTON1_MASK:
+            self._pressed = None         # the drag was cut short (a menu opened)
+        if self._pressed is None:        # moves with a button down come from the drag
+            self.on_motion(self, SimpleNamespace(x=x, y=y, button=0, state=state))
+
     def on_press(self, widget, ev):
         self.grab_focus()
         x, y = self.to_dots(ev.x, ev.y)
-        if ev.type == Gdk.EventType._2BUTTON_PRESS and ev.button == 1:
+        if getattr(ev, "n_press", 1) == 2 and ev.button == 1:
             el = self.hit(x, y)
             if el:
                 self.host.activate_element(el)
             return True
-        if ev.type != Gdk.EventType.BUTTON_PRESS:
-            return False
         if ev.button == 3:
             el = self.hit(x, y)
             if el is None or not self.host.is_selected(el):
@@ -355,7 +407,7 @@ class LabelCanvas(Gtk.DrawingArea):
                     return True
                 self.host.checkpoint()
                 d["started"] = True
-            free = bool(ev.state & Gdk.ModifierType.MOD1_MASK) or not self.snap
+            free = bool(ev.state & Gdk.ModifierType.ALT_MASK) or not self.snap
             self.guides = []
             if d["mode"] == "move":
                 _bx, _by, bw, bh = el.bounds()
@@ -385,9 +437,7 @@ class LabelCanvas(Gtk.DrawingArea):
             self.hover = hov
             self.queue_draw()
         cursor = "se-resize" if self.on_handle(ev.x, ev.y) else ("move" if hov else None)
-        win = self.get_window()
-        if win:
-            win.set_cursor(Gdk.Cursor.new_from_name(win.get_display(), cursor) if cursor else None)
+        self.set_cursor_from_name(cursor)
         return True
 
     def on_leave(self, *_):
@@ -428,12 +478,12 @@ class LabelCanvas(Gtk.DrawingArea):
         bx, by, bw, bh = box
         return bx >= x0 and by >= y0 and bx + bw <= x1 and by + bh <= y1
 
-    def on_drop(self, widget, ctx, ex, ey, data, info, time):
-        paths = []
-        for uri in data.get_uris() or []:
-            u = urlparse(uri)
-            if u.scheme == "file":
-                paths.append(unquote(u.path))
+    def _dropped(self, _target, files, ex, ey):
+        paths = [f.get_path() for f in files.get_files() if f.get_path()]
+        self.on_drop(paths, ex, ey)
+        return bool(paths)
+
+    def on_drop(self, paths, ex, ey):
         x, y = self.to_dots(ex, ey)
         if paths:
             self.host.drop_files(paths, x, y)
