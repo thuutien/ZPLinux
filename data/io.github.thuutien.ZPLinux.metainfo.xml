@@ -57,6 +57,14 @@
     <mediatype>application/x-zplinux</mediatype>
   </provides>
   <releases>
+    <release version="0.8.1" date="2026-10-29">
+      <description>
+        <ul>
+          <li>The Locked switch in the Element panel locks the object again</li>
+          <li>"Wrap in a box" and the size steps of the printer fonts work again</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.8.0" date="2026-10-29">
       <description>
         <p>ZPLinux now uses GTK 4. It looks and works as before.</p>
