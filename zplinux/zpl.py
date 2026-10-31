@@ -159,6 +159,12 @@ def element_zpl(el) -> List[str]:
     return []
 
 
+def _needs_raster(el) -> bool:
+    """Non-ASCII text goes as a graphic: printer ZPL emulations (Xprinter etc.)
+    ignore ^CI28 and print nothing for Cyrillic."""
+    return isinstance(el, TextElement) and not el.text.isascii()
+
+
 def placement(el, label: Label) -> str:
     """'inside', 'cut' (partly outside the label) or 'outside'."""
     bx, by, bw, bh = el.bounds()
@@ -203,7 +209,7 @@ def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
         return "".join(label_zpl(label, values, 1, offset + i) for i in range(n))
     lab = label.filled(values, offset)
     if lab.orientation % 360 or any(el.x < 0 or el.y < 0 or el.rotation % 360
-                                    for el in lab.elements):
+                                    or _needs_raster(el) for el in lab.elements):
         # sizes decide what is left on the label, and where rotated fields go
         from . import render
         render.measure(lab)
@@ -222,7 +228,7 @@ def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
         # printer cuts fields off itself; past the left or top it can't place them.
         if el.x >= lab.width_dots or el.y >= lab.height_dots:
             continue
-        if el.x < 0 or el.y < 0:
+        if el.x < 0 or el.y < 0 or _needs_raster(el):
             lines.extend(visible_zpl(el, lab))
         else:
             lines.extend(element_zpl(el))
