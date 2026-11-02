@@ -70,6 +70,8 @@ modules:
       - mv /app/share/applications/zplinux.desktop /app/share/applications/io.github.thuutien.ZPLinux.desktop
       - sed -i 's/^Icon=zplinux$/Icon=io.github.thuutien.ZPLinux/' /app/share/applications/io.github.thuutien.ZPLinux.desktop
       - mv /app/share/icons/hicolor/scalable/apps/zplinux.svg /app/share/icons/hicolor/scalable/apps/io.github.thuutien.ZPLinux.svg
+      # The app itself asks for "zplinux": keep a copy in its private icon folder.
+      - install -Dm644 data/zplinux.svg /app/share/zplinux/icons/hicolor/scalable/apps/zplinux.svg
       - sed 's|<icon name="zplinux"/>|<icon name="io.github.thuutien.ZPLinux"/>|' /app/share/mime/packages/zplinux.xml > /app/share/mime/packages/io.github.thuutien.ZPLinux.xml
       - rm /app/share/mime/packages/zplinux.xml
       - install -Dm644 data/io.github.thuutien.ZPLinux.metainfo.xml /app/share/metainfo/io.github.thuutien.ZPLinux.metainfo.xml
