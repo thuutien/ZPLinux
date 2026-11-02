@@ -26,10 +26,18 @@ class UpdaterTests(unittest.TestCase):
 
     def test_asset_for(self):
         rel = updater.Release("0.2.0", "u", assets={
-            "zplinux_0.2.0_all.deb": ("x", "a"), "zplinux-0.2.0.tar.gz": ("y", "b")})
+            "zplinux_0.2.0_all.deb": ("x", "a"), "zplinux-0.2.0.tar.gz": ("y", "b"),
+            "zplinux-0.2.0-1.noarch.rpm": ("z", "c")})
         self.assertEqual(updater.asset_for(rel, "deb"), "zplinux_0.2.0_all.deb")
+        self.assertEqual(updater.asset_for(rel, "rpm"), "zplinux-0.2.0-1.noarch.rpm")
         self.assertEqual(updater.asset_for(rel, "tarball"), "zplinux-0.2.0.tar.gz")
         self.assertIsNone(updater.asset_for(rel, "manual"))
+        self.assertIsNone(updater.asset_for(rel, "package"))
+
+    def test_rpm_install_command(self):
+        cmd = updater.install_command("rpm", "/tmp/zplinux-0.2.0-1.noarch.rpm", "/tmp")
+        self.assertEqual(cmd[0], "pkexec")
+        self.assertEqual(cmd[-1], "/tmp/zplinux-0.2.0-1.noarch.rpm")
 
     def test_running_from_source_is_manual(self):
         self.assertEqual(updater.install_method(), "manual")

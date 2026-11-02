@@ -57,6 +57,15 @@
     <mediatype>application/x-zplinux</mediatype>
   </provides>
   <releases>
+    <release version="0.8.2" date="2026-11-02">
+      <description>
+        <ul>
+          <li>Label text in the preview has the right width on systems without a narrow font, such as Arch and Fedora</li>
+          <li>Text no longer piles up on top of a QR code or barcode placeholder</li>
+          <li>New .rpm package for Fedora, which the update bar can install</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.8.1" date="2026-10-29">
       <description>
         <ul>
