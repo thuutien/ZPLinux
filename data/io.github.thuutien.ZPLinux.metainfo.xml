@@ -63,6 +63,7 @@
           <li>Label text in the preview has the right width on systems without a narrow font, such as Arch and Fedora</li>
           <li>Text no longer piles up on top of a QR code or barcode placeholder</li>
           <li>New .rpm package for Fedora, which the update bar can install</li>
+          <li>The Flatpak shows the ZPLinux logo again instead of a missing icon</li>
         </ul>
       </description>
     </release>
