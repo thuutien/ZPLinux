@@ -86,21 +86,21 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 [releases page](https://github.com/thuutien/ZPLinux/releases/latest):
 
 ```bash
-sudo apt install ./zplinux_0.8.2_all.deb
+sudo apt install ./zplinux_0.8.3_all.deb
 ```
 
 **Fedora**: install the `.rpm` from the releases page:
 
 ```bash
-sudo dnf install ./zplinux-0.8.2-1.noarch.rpm
+sudo dnf install ./zplinux-0.8.3-1.noarch.rpm
 ```
 
-**Flatpak (any distribution)**: download `zplinux-0.8.2.flatpak` from the
+**Flatpak (any distribution)**: download `zplinux-0.8.3.flatpak` from the
 releases page and install it for your user. Flatpak fetches the GNOME runtime
 from Flathub if you don't have it yet:
 
 ```bash
-flatpak install --user ./zplinux-0.8.2.flatpak
+flatpak install --user ./zplinux-0.8.3.flatpak
 ```
 
 The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`) and CUPS;

@@ -57,6 +57,13 @@
     <mediatype>application/x-zplinux</mediatype>
   </provides>
   <releases>
+    <release version="0.8.3" date="2026-11-02">
+      <description>
+        <ul>
+          <li>New printer option "Send non-ASCII text as graphics", for Xprinter and other ZPL printers that print nothing for letters like ä, € or Cyrillic</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.8.2" date="2026-11-02">
       <description>
         <ul>
