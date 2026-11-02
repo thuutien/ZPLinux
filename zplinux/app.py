@@ -620,7 +620,7 @@ class Window(Gtk.ApplicationWindow):
     def _build_update_bar(self, root):
         bar = Gtk.Box(spacing=8)
         bar.add_css_class("update-bar")
-        pack(bar, Gtk.Image.new_from_icon_name("software-update-available-symbolic"), False, False, 0)
+        pack(bar, Gtk.Image.new_from_icon_name("zplinux-update-symbolic"), False, False, 0)
         self.update_text = Gtk.Label(xalign=0, wrap=True)
         pack(bar, self.update_text, True, True, 0)
         buttons = []
