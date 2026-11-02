@@ -30,6 +30,7 @@ class PrinterConfig:
     device: str = "/dev/usb/lp0"
     cups_queue: str = ""
     file_path: str = ""
+    raster_non_ascii: bool = False   # for ZPL emulations that ignore ^CI28
 
     def to_dict(self) -> dict:
         return asdict(self)

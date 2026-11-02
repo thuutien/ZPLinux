@@ -270,6 +270,17 @@ class OffLabelTests(unittest.TestCase):
         out = self.fields(TextElement(x=-10, y=-5, text="HI", height=40, reverse=True))
         self.assertTrue(out[0].startswith("^FO0,0^FR^GFA,"), out[0])
 
+    def test_non_ascii_text_is_a_graphic_only_when_the_printer_asks(self):
+        lab = self.lab(TextElement(x=10, y=10, text="Привіт", height=30),
+                       TextElement(x=10, y=60, text="Hi", height=30))
+        fields = [l for l in zpl.label_zpl(lab).splitlines() if l.startswith("^FO")]
+        self.assertIn("^FD", fields[0])   # Zebras print UTF-8 text with ^CI28
+        fields = [l for l in zpl.label_zpl(lab, raster_non_ascii=True).splitlines()
+                  if l.startswith("^FO")]
+        self.assertTrue(fields[0].startswith("^FO10,10^GFA,"), fields[0])
+        self.assertIn("^FDHi^FS", fields[1])
+        self.assertIn("^GFA,", zpl.batch_zpl(lab, [{}], raster_non_ascii=True))
+
     def test_placement(self):
         lab = self.lab()
         self.assertEqual(zpl.placement(BoxElement(x=10, y=10, w=50, h=50), lab), "inside")
@@ -449,6 +460,16 @@ class SavedPrinterTests(unittest.TestCase):
         self.assertEqual([p.name for p in loaded], ["Office", "Warehouse GK420d"])
         self.assertEqual(default, 1)
         self.assertEqual(loaded[default].cups_queue, "GK420d")
+
+    def test_raster_option_is_saved_and_off_by_default(self):
+        settings = {}
+        printers = [printing.PrinterConfig(name="Zebra"),
+                    printing.PrinterConfig(name="Xprinter", raster_non_ascii=True)]
+        printing.store_printers(settings, printers, 0)
+        loaded, _ = printing.load_printers(settings)
+        self.assertEqual([p.raster_non_ascii for p in loaded], [False, True])
+        self.assertFalse(printing.load_printers({"printers": [{"name": "Old"}]})[0][0]
+                         .raster_non_ascii)
 
     def test_missing_default_falls_back_to_first(self):
         settings = {"printers": [{"name": "A"}, {"name": "B"}], "default_printer": "gone"}

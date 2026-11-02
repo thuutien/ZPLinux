@@ -159,6 +159,12 @@ def element_zpl(el) -> List[str]:
     return []
 
 
+def _needs_raster(el) -> bool:
+    """Non-ASCII text, for printers set to get it as a graphic: ZPL emulations
+    (Xprinter etc.) ignore ^CI28 and print nothing for Cyrillic."""
+    return isinstance(el, TextElement) and not el.text.isascii()
+
+
 def placement(el, label: Label) -> str:
     """'inside', 'cut' (partly outside the label) or 'outside'."""
     bx, by, bw, bh = el.bounds()
@@ -194,15 +200,19 @@ def to_print(lab: Label) -> Label:
 
 
 def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
-              copies: Optional[int] = None, offset: int = 0) -> str:
+              copies: Optional[int] = None, offset: int = 0,
+              raster_non_ascii: bool = False) -> str:
     """ZPL for the label. offset: how many labels have been printed before this one in
-    the job, for {counter}."""
+    the job, for {counter}. raster_non_ascii: send text with non-ASCII characters as
+    a graphic, for printers that ignore ^CI28."""
     n = copies if copies is not None else label.copies
     if n > 1 and label.uses_counter():
         # each copy gets its own number, so each is its own label
-        return "".join(label_zpl(label, values, 1, offset + i) for i in range(n))
+        return "".join(label_zpl(label, values, 1, offset + i, raster_non_ascii)
+                       for i in range(n))
     lab = label.filled(values, offset)
     if lab.orientation % 360 or any(el.x < 0 or el.y < 0 or el.rotation % 360
+                                    or (raster_non_ascii and _needs_raster(el))
                                     for el in lab.elements):
         # sizes decide what is left on the label, and where rotated fields go
         from . import render
@@ -222,7 +232,7 @@ def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
         # printer cuts fields off itself; past the left or top it can't place them.
         if el.x >= lab.width_dots or el.y >= lab.height_dots:
             continue
-        if el.x < 0 or el.y < 0:
+        if el.x < 0 or el.y < 0 or (raster_non_ascii and _needs_raster(el)):
             lines.extend(visible_zpl(el, lab))
         else:
             lines.extend(element_zpl(el))
@@ -232,12 +242,14 @@ def label_zpl(label: Label, values: Optional[Dict[str, str]] = None,
     return "\n".join(lines) + "\n"
 
 
-def batch_zpl(label: Label, rows: Iterable[Dict[str, str]]) -> str:
+def batch_zpl(label: Label, rows: Iterable[Dict[str, str]],
+              raster_non_ascii: bool = False) -> str:
     """One label per row of variable values, each printed `label.copies` times; the
     counter goes on from label to label."""
     rows = list(rows)
     per_row = label.copies if label.uses_counter() else 1
-    return "".join(label_zpl(label, row, offset=i * per_row) for i, row in enumerate(rows))
+    return "".join(label_zpl(label, row, offset=i * per_row, raster_non_ascii=raster_non_ascii)
+                   for i, row in enumerate(rows))
 
 
 def labels_printed(label: Label, rows: int = 1) -> int:

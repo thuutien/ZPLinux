@@ -549,6 +549,7 @@ class Window(Gtk.ApplicationWindow):
     def _on_printer_row(self, lb, row):
         self.printer = row.printer
         self._update_printer_info()
+        self.refresh_zpl()   # the printer can change how text is sent
 
     def _test_printer(self):
         msg = check_printer(self.printer)
@@ -2182,7 +2183,8 @@ class Window(Gtk.ApplicationWindow):
             self._update_tab(self.doc)
 
     def current_zpl(self) -> str:
-        return zpl.label_zpl(self.label, self.values)
+        return zpl.label_zpl(self.label, self.values,
+                             raster_non_ascii=self.printer.raster_non_ascii)
 
     def refresh_zpl(self):
         def do():
@@ -2407,7 +2409,7 @@ class Window(Gtk.ApplicationWindow):
         if not self.ask(f"Print {len(rows) * copies} labels?", detail, "Print"):
             return
         merged = [{**self.values, **{k: (v or "") for k, v in r.items() if k}} for r in rows]
-        if self._send(zpl.batch_zpl(self.label, merged),
+        if self._send(zpl.batch_zpl(self.label, merged, self.printer.raster_non_ascii),
                       f"{len(rows)} labels from {os.path.basename(path)}"):
             self._advance_counter(zpl.labels_printed(self.label, len(rows)))
 
@@ -2524,15 +2526,20 @@ class Window(Gtk.ApplicationWindow):
         g.attach(dim_label("Writes print jobs to a .zpl file instead of a printer."), 0, 1, 2, 1)
         stack.add_named(g, "file")
 
+        raster = Gtk.CheckButton(label="Send non-ASCII text as graphics")
+        grid.attach(raster, 0, 3, 2, 1)
+        grid.attach(dim_label("For printers that print nothing for letters like ä, € or "
+                              "Cyrillic (Xprinter and other ZPL emulations). Zebra "
+                              "printers don't need it."), 0, 4, 2, 1)
         default = Gtk.CheckButton(label="Default printer")
-        grid.attach(default, 0, 3, 2, 1)
+        grid.attach(default, 0, 5, 2, 1)
         test_row = Gtk.Box(spacing=10)
         test = Gtk.Button(label="Check Printer")
         result = dim_label("")
         result.set_selectable(True)
         pack(test_row, test, False, False, 0)
         pack(test_row, result, True, True, 0)
-        grid.attach(test_row, 0, 4, 2, 1)
+        grid.attach(test_row, 0, 6, 2, 1)
 
         def store():
             """Copy the form into the printer being edited."""
@@ -2546,6 +2553,7 @@ class Window(Gtk.ApplicationWindow):
             cfg.device = dev.get_text().strip()
             cfg.cups_queue = queue.get_text().strip()
             cfg.file_path = fentry.get_text().strip()
+            cfg.raster_non_ascii = raster.get_active()
 
         def load(cfg):
             state.loading = True
@@ -2558,6 +2566,7 @@ class Window(Gtk.ApplicationWindow):
             dev.set_text(cfg.device)
             queue.set_text(cfg.cups_queue)
             fentry.set_text(cfg.file_path)
+            raster.set_active(cfg.raster_non_ascii)
             default.set_active(cfg is state.default)
             default.set_sensitive(cfg is not state.default)   # always keep one default
             result.set_text("")
@@ -2641,6 +2650,7 @@ class Window(Gtk.ApplicationWindow):
         for w in (name, host, fentry, dev, queue):
             w.connect("changed", changed)
         port.connect("value-changed", changed)
+        raster.connect("toggled", changed)
         method.connect("changed", method_changed)
         default.connect("toggled", default_toggled)
         test.connect("clicked", lambda *_: run_test())
@@ -2654,6 +2664,7 @@ class Window(Gtk.ApplicationWindow):
             save_settings(self.settings)
             self.printers, self.default_printer = printers, index
             self.printer = in_use if any(p is in_use for p in printers) else state.default
+            self.refresh_zpl()
             self.notify(f"{len(printers)} printer{'s' if len(printers) != 1 else ''} saved · "
                         f"default: {state.default.name}")
         dlg.destroy()
