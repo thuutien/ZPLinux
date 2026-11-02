@@ -86,15 +86,21 @@ ZPLinux designs labels on any Linux desktop and sends real ZPL to the printer.
 [releases page](https://github.com/thuutien/ZPLinux/releases/latest):
 
 ```bash
-sudo apt install ./zplinux_0.8.1_all.deb
+sudo apt install ./zplinux_0.8.2_all.deb
 ```
 
-**Flatpak (any distribution)**: download `zplinux-0.8.1.flatpak` from the
+**Fedora**: install the `.rpm` from the releases page:
+
+```bash
+sudo dnf install ./zplinux-0.8.2-1.noarch.rpm
+```
+
+**Flatpak (any distribution)**: download `zplinux-0.8.2.flatpak` from the
 releases page and install it for your user. Flatpak fetches the GNOME runtime
 from Flathub if you don't have it yet:
 
 ```bash
-flatpak install --user ./zplinux-0.8.1.flatpak
+flatpak install --user ./zplinux-0.8.2.flatpak
 ```
 
 The Flatpak can reach network printers, USB printers (`/dev/usb/lp*`) and CUPS;
@@ -121,7 +127,7 @@ ZPLinux asks GitHub for the latest release at most once a day (turn this off
 in Preferences, or use **Check for Updates** in the menu). When a newer version
 exists, a bar at the top of the window offers to install it:
 
-- **.deb and `install.sh` installs**: ZPLinux downloads the matching release
+- **.deb, .rpm and `install.sh` installs**: ZPLinux downloads the matching release
   file, checks it against the SHA-256 checksum GitHub publishes, and installs
   it with `pkexec` (you'll be asked for your password), then offers to restart.
 - **AUR / other package managers**: update through the package manager.
@@ -130,13 +136,15 @@ exists, a bar at the top of the window offers to install it:
 - **Running from source**: the bar links to the release page.
 
 For this to work, each GitHub release (tag `v<version>`) needs
-`zplinux_<version>_all.deb` and `zplinux-<version>.tar.gz` attached.
+`zplinux_<version>_all.deb`, `zplinux-<version>-1.noarch.rpm` and
+`zplinux-<version>.tar.gz` attached.
 
 ### Building the packages
 
 ```bash
 ./packaging/build-tarball.sh   # dist/zplinux-<version>.tar.gz (prints its sha256)
 ./packaging/build-deb.sh       # dist/zplinux_<version>_all.deb
+./packaging/build-rpm.sh       # dist/zplinux-<version>-1.noarch.rpm (needs rpmbuild)
 ./packaging/build-flatpak.sh   # dist/zplinux-<version>.flatpak (needs flatpak-builder)
 ```
 

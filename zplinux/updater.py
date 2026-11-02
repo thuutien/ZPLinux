@@ -101,8 +101,9 @@ def install_method() -> str:
     """How this copy of ZPLinux was installed.
 
     "deb"     - Debian package, can be upgraded with apt
+    "rpm"     - RPM package, can be upgraded with dnf, zypper or rpm
     "tarball" - install.sh into /usr/lib/zplinux, can be upgraded the same way
-    "package" - owned by another package manager (rpm, pacman/AUR)
+    "package" - owned by another package manager (pacman/AUR)
     "flatpak" - Flatpak bundle; the user installs the new bundle
     "manual"  - running from source; the user updates it
     """
@@ -116,7 +117,9 @@ def install_method() -> str:
                                 capture_output=True, text=True).stdout
         if status.endswith(" installed"):
             return "deb"
-    if _owned_by(["rpm", "-q", "zplinux"]) or _owned_by(["pacman", "-Qq", "zplinux"]):
+    if _owned_by(["rpm", "-q", "zplinux"]):
+        return "rpm"
+    if _owned_by(["pacman", "-Qq", "zplinux"]):
         return "package"
     return "tarball"
 
@@ -124,6 +127,8 @@ def install_method() -> str:
 def asset_for(rel: Release, method: str) -> Optional[str]:
     if method == "deb":
         name = f"zplinux_{rel.version}_all.deb"
+    elif method == "rpm":
+        name = f"zplinux-{rel.version}-1.noarch.rpm"
     elif method == "tarball":
         name = f"zplinux-{rel.version}.tar.gz"
     else:
@@ -162,6 +167,13 @@ def install_command(method: str, path: str, dest_dir: str) -> List[str]:
     """Prepare the downloaded asset and return the privileged install command."""
     if method == "deb":
         return ["pkexec", "apt-get", "install", "-y", path]
+    if method == "rpm":
+        if shutil.which("dnf"):
+            return ["pkexec", "dnf", "install", "-y", path]
+        if shutil.which("zypper"):
+            # release RPMs are not signed; the SHA-256 check above vouches for them
+            return ["pkexec", "zypper", "--non-interactive", "install", "--allow-unsigned-rpm", path]
+        return ["pkexec", "rpm", "-U", path]
     if method == "tarball":
         with tarfile.open(path) as tar:
             members = tar.getmembers()
