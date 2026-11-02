@@ -488,6 +488,8 @@ DRAWERS = {
 
 
 def _draw_upright(cr, el, label: Label) -> None:
+    # Placeholders end on a move_to; show_layout would draw the next text there.
+    cr.new_path()
     if isinstance(el, BarcodeElement):
         draw_barcode(cr, el, dpmm(label.dpi))
     else:
