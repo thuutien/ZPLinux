@@ -24,13 +24,30 @@ FONT_FAMILY = "Liberation Sans Narrow, Nimbus Sans Narrow, Ubuntu Condensed, Dej
 EM_PER_HEIGHT = 1.0
 # Font 0 is a little narrower than its height at width == height.
 WIDTH_FACTOR = 1.02
+# Arial Narrow (and Liberation Sans Narrow) is Arial drawn at 82% of its width.
+NARROW = 0.82
 
 _image_cache: Dict[Tuple, cairo.ImageSurface] = {}
+_font_choice: Optional[Tuple[str, float]] = None
+
+
+def _font() -> Tuple[str, float]:
+    """The font 0 stand-in and the horizontal scale it needs. Liberation 2 (Arch,
+    Fedora) has no Narrow style, so without a narrow font Liberation Sans is
+    squeezed to the widths of Liberation Sans Narrow."""
+    global _font_choice
+    if _font_choice is None:
+        names = {f.get_name() for f in PangoCairo.FontMap.get_default().list_families()}
+        if not names & {"Liberation Sans Narrow", "Nimbus Sans Narrow"} and "Liberation Sans" in names:
+            _font_choice = ("Liberation Sans", NARROW)
+        else:
+            _font_choice = (FONT_FAMILY, 1.0)
+    return _font_choice
 
 
 def _font_layout(cr, text: str, height: int, bold: bool = True) -> Pango.Layout:
     layout = PangoCairo.create_layout(cr)
-    desc = Pango.FontDescription.from_string(FONT_FAMILY)
+    desc = Pango.FontDescription.from_string(_font()[0])
     desc.set_weight(Pango.Weight.BOLD if bold else Pango.Weight.NORMAL)
     desc.set_absolute_size(height * EM_PER_HEIGHT * Pango.SCALE)
     layout.set_font_description(desc)
@@ -127,7 +144,7 @@ def draw_text(cr, el: TextElement) -> None:
         draw_bitmap_text(cr, el)
         return
     h = el.height
-    xscale = (el.width or h) / h * WIDTH_FACTOR
+    xscale = (el.width or h) / h * WIDTH_FACTOR * _font()[1]
     layout = _font_layout(cr, el.text, h)
     # Line pitch equals the character height, as on the printer.
     layout.set_spacing(0)
@@ -190,9 +207,10 @@ def draw_code128(cr, el: Code128Element) -> None:
         layout = _font_layout(cr, el.data, s)
         _, logical = layout.get_pixel_extents()
         sy = s / max(1, logical.height)
-        tw = logical.width * WIDTH_FACTOR
+        sx = WIDTH_FACTOR * _font()[1]
+        tw = logical.width * sx
         cr.translate(el.x + (el.measured_w - tw) / 2, el.y + el.height + el.text_gap())
-        cr.scale(WIDTH_FACTOR, sy)
+        cr.scale(sx, sy)
         PangoCairo.show_layout(cr, layout)
     elif el.show_text:
         th = interpretation_height(el.module)
@@ -200,10 +218,11 @@ def draw_code128(cr, el: Code128Element) -> None:
         _, logical = layout.get_pixel_extents()
         # The printer's interpretation font is smaller than its line slot.
         sy = th * 0.8 / max(1, logical.height)
-        tw = logical.width * sy
+        sx = sy * _font()[1]
+        tw = logical.width * sx
         cr.translate(el.x + (el.measured_w - tw) / 2,
                      el.y + el.height + el.text_gap() + th * 0.15)
-        cr.scale(sy, sy)
+        cr.scale(sx, sy)
         PangoCairo.show_layout(cr, layout)
     cr.restore()
 
@@ -214,9 +233,10 @@ def _barcode_text(cr, el, text: str, left: float, width: float, top: float) -> f
     layout = _font_layout(cr, text, th, bold=False)
     _, logical = layout.get_pixel_extents()
     sy = th * 0.8 / max(1, logical.height)
+    sx = sy * _font()[1]
     cr.save()
-    cr.translate(left + (width - logical.width * sy) / 2, top + th * 0.15)
-    cr.scale(sy, sy)
+    cr.translate(left + (width - logical.width * sx) / 2, top + th * 0.15)
+    cr.scale(sx, sy)
     PangoCairo.show_layout(cr, layout)
     cr.restore()
     return th
